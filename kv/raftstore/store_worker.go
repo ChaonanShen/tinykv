@@ -170,6 +170,8 @@ func (d *storeWorker) onRaftMessage(msg *rspb.RaftMessage) error {
 		// Target tombstone peer doesn't exist, so ignore it.
 		return nil
 	}
+
+	// 检查msg是否发往还未创建的peer，如果是就创建这个peer然后再发送
 	ok, err := d.checkMsg(msg)
 	if err != nil {
 		return err

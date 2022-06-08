@@ -39,11 +39,11 @@ func NewNode(system *Raftstore, cfg *config.Config, schedulerClient scheduler_cl
 }
 
 func (n *Node) Start(ctx context.Context, engines *engine_util.Engines, trans Transport, snapMgr *snap.SnapManager) error {
-	storeID, err := n.checkStore(engines)
+	storeID, err := n.checkStore(engines) // 如果storeID已经分配了，就直接读取engine获取
 	if err != nil {
 		return err
 	}
-	if storeID == util.InvalidID {
+	if storeID == util.InvalidID { // 分配一个全新的storeID，并且保存到enginie中
 		storeID, err = n.bootstrapStore(ctx, engines)
 	}
 	if err != nil {
@@ -51,12 +51,12 @@ func (n *Node) Start(ctx context.Context, engines *engine_util.Engines, trans Tr
 	}
 	n.store.Id = storeID
 
-	firstRegion, err := n.checkOrPrepareBootstrapCluster(ctx, engines, storeID)
+	firstRegion, err := n.checkOrPrepareBootstrapCluster(ctx, engines, storeID) // 如果是新集群，返回第一个创建的region
 	if err != nil {
 		return err
 	}
 	newCluster := firstRegion != nil
-	if newCluster {
+	if newCluster { // 新集群的话
 		log.Infof("try bootstrap cluster, storeID: %d, region: %s", storeID, firstRegion)
 		newCluster, err = n.BootstrapCluster(ctx, engines, firstRegion)
 		if err != nil {
@@ -110,7 +110,7 @@ func (n *Node) allocID(ctx context.Context) (uint64, error) {
 
 func (n *Node) checkOrPrepareBootstrapCluster(ctx context.Context, engines *engine_util.Engines, storeID uint64) (*metapb.Region, error) {
 	var state raft_serverpb.RegionLocalState
-	if err := engine_util.GetMeta(engines.Kv, meta.PrepareBootstrapKey, &state); err == nil {
+	if err := engine_util.GetMeta(engines.Kv, meta.PrepareBootstrapKey, &state); err == nil { // 如果已经有region信息，就返回
 		return state.Region, nil
 	}
 	bootstrapped, err := n.checkClusterBootstrapped(ctx)
@@ -120,7 +120,9 @@ func (n *Node) checkOrPrepareBootstrapCluster(ctx context.Context, engines *engi
 	if bootstrapped {
 		return nil, nil
 	}
-	return n.prepareBootstrapCluster(ctx, engines, storeID)
+	// 已经bootstrapped就直接返回
+	// 否则就是没有bootstrap，那就创建一个新region，分配regionID和peerID，目前region.Peers只有{peerID, storeID}一个成员
+	return n.prepareBootstrapCluster(ctx, engines, storeID) // 分配regionID和peerID，生成一个metapb.Region，里面Peers只有{peerID, storeID}一个成员，保存到engine中
 }
 
 const (

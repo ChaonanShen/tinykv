@@ -49,7 +49,7 @@ var ErrProposalDropped = errors.New("raft proposal dropped")
 // Config contains the parameters to start a raft.
 type Config struct {
 	// ID is the identity of the local raft. ID cannot be 0.
-	ID uint64
+	ID uint64 // 我感觉就是赋值peerID
 
 	// peers contains the IDs of all nodes (including self) in the raft cluster. It
 	// should only be set when starting a new raft cluster. Restarting raft from

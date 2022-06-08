@@ -86,6 +86,7 @@ func (ps *PeerStorage) InitialState() (eraftpb.HardState, eraftpb.ConfState, err
 	return *raftState.HardState, util.ConfStateFromRegion(ps.region), nil
 }
 
+// 返回范围 [low, hi) 直接从kvDB中读取
 func (ps *PeerStorage) Entries(low, high uint64) ([]eraftpb.Entry, error) {
 	if err := ps.checkRange(low, high); err != nil || low == high {
 		return nil, err
@@ -100,7 +101,7 @@ func (ps *PeerStorage) Entries(low, high uint64) ([]eraftpb.Entry, error) {
 	defer iter.Close()
 	for iter.Seek(startKey); iter.Valid(); iter.Next() {
 		item := iter.Item()
-		if bytes.Compare(item.Key(), endKey) >= 0 {
+		if bytes.Compare(item.Key(), endKey) >= 0 { // 注意endKey是不取出去的！所以取出元素不包含hi这个位置！
 			break
 		}
 		val, err := item.Value()

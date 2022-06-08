@@ -97,7 +97,7 @@ func (txn *MvccTxn) MostRecentWrite(key []byte) (*Write, uint64, error) {
 func EncodeKey(key []byte, ts uint64) []byte {
 	encodedKey := codec.EncodeBytes(key)
 	newKey := append(encodedKey, make([]byte, 8)...)
-	binary.BigEndian.PutUint64(newKey[len(encodedKey):], ^ts)
+	binary.BigEndian.PutUint64(newKey[len(encodedKey):], ^ts) // 将ts取反后以大端形式拼接在key之后，这样就能先按key升序，再按ts降序
 	return newKey
 }
 

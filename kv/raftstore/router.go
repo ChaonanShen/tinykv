@@ -87,7 +87,7 @@ func (r *RaftstoreRouter) Send(regionID uint64, msg message.Msg) error {
 
 func (r *RaftstoreRouter) SendRaftMessage(msg *raft_serverpb.RaftMessage) error {
 	regionID := msg.RegionId
-	if r.router.send(regionID, message.NewPeerMsg(message.MsgTypeRaftMessage, regionID, msg)) != nil {
+	if r.router.send(regionID, message.NewPeerMsg(message.MsgTypeRaftMessage, regionID, msg)) != nil { // 可能有ErrPeerNotFound错误
 		r.router.sendStore(message.NewPeerMsg(message.MsgTypeStoreRaftMessage, regionID, msg))
 	}
 	return nil

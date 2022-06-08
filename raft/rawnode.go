@@ -129,6 +129,8 @@ func (rn *RawNode) ApplyConfChange(cc pb.ConfChange) *pb.ConfState {
 }
 
 // Step advances the state machine using the given message.
+// rn.Step是给其他peers传来的msgs，所以会过滤MsgHup和MsgBeat这样的local msg（不过不会过滤MsgPropose，可能是因为MsgPropose可能会从follower转发到leader）
+// 因此Campaign()和Propose()函数中要直接调用rn.Raft.Step
 func (rn *RawNode) Step(m pb.Message) error {
 	// ignore unexpected local messages receiving over network
 	if IsLocalMsg(m.MsgType) {
