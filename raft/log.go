@@ -125,14 +125,29 @@ func (l *RaftLog) matchTerm(i, term uint64) bool {
 // maybeAppend returns (0, false) if the entries cannot be appended. Otherwise,
 // it returns (last index of new entries, true).
 func (l *RaftLog) maybeAppend(index, logTerm, committed uint64, ents ...pb.Entry) (lastnewi uint64, ok bool) {
+
 	if l.matchTerm(index, logTerm) {
 		lastnewi = index + uint64(len(ents))
+
+		if len(ents) == 0 {
+			return lastnewi, true
+		}
+
 		var offset uint64
 		if len(l.entries) > 0 {
 			offset = l.entries[0].Index
 		}
 		if index+1 <= l.LastIndex() { // 需要切割不匹配部分
+			// 排除一种情况，传入的entries完全是已有entries的子集！那就什么都不用修改
+			li, lt := ents[len(ents)-1].Index, ents[len(ents)-1].Term
+			if li <= l.LastIndex() && l.matchTerm(li, lt) {
+				return lastnewi, true
+			}
+
 			l.entries = l.entries[:index-offset+1]
+			if l.stabled > l.LastIndex() {
+				l.stabled = l.LastIndex()
+			}
 		}
 		l.append(ents...)
 		l.commitTo(min(committed, lastnewi))
@@ -172,7 +187,7 @@ func (l *RaftLog) maybeCompact() {
 func (l *RaftLog) unstableEntries() []pb.Entry {
 	// Your Code Here (2A).
 	offset := l.entries[0].Index
-	var ents []pb.Entry
+	ents := make([]pb.Entry, 0) // 直接var ents []pb.Entry定义的话如果没有append任何元素会返回nil！
 	for i := l.stabled + 1; i <= l.LastIndex(); i++ {
 		ents = append(ents, l.entries[i-offset])
 	}
