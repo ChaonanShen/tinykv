@@ -53,7 +53,7 @@ const FORMAT_TIME_HOUR string = "2006010215"
 var _log *Logger = New()
 
 func init() {
-	SetFlags(Ldate | Ltime | Lshortfile)
+	SetFlags(Ltime | Lmicroseconds | Lshortfile)
 	SetHighlighting(runtime.GOOS != "windows")
 }
 

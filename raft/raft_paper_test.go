@@ -333,7 +333,7 @@ func testNonleadersElectionTimeoutNonconflict(t *testing.T, state StateType) {
 		}
 
 		timeoutNum := 0
-		for timeoutNum == 0 {
+		for timeoutNum == 0 { // 不断tick，知道某个节点最先触发electionTimeout（要求是尽量不要有两个节点同时出发electionTimeout）
 			for _, r := range rs {
 				r.tick()
 				if len(r.readMessages()) > 0 {
@@ -577,24 +577,24 @@ func TestFollowerCheckMessageType_MsgAppend2AB(t *testing.T) {
 	}{
 		// match with committed entries
 		{0, 0, false},
-		{ents[0].Term, ents[0].Index, false},
+		{ents[0].Term, ents[0].Index, false}, // 1 1 false
 		// match with uncommitted entries
-		{ents[1].Term, ents[1].Index, false},
+		{ents[1].Term, ents[1].Index, false}, // 2 2 false
 
 		// unmatch with existing entry
-		{ents[0].Term, ents[1].Index, true},
+		{ents[0].Term, ents[1].Index, true}, // 1 2 true
 		// unexisting entry
-		{ents[1].Term + 1, ents[1].Index + 1, true},
+		{ents[1].Term + 1, ents[1].Index + 1, true}, // 3 3 true
 	}
-	for i, tt := range tests {
+	for i, tt := range tests { // 每个tests tt都是一种情形，每种情形生成一个RaftGroup来处理
 		storage := NewMemoryStorage()
 		storage.Append(ents)
 		r := newTestRaft(1, []uint64{1, 2, 3}, 10, 1, storage)
 		r.RaftLog.committed = 1
-		r.becomeFollower(2, 2)
+		r.becomeFollower(2, 2)   // leader is 2
 		msgs := r.readMessages() // clear message
 
-		r.Step(pb.Message{From: 2, To: 1, MsgType: pb.MessageType_MsgAppend, Term: 2, LogTerm: tt.term, Index: tt.index})
+		r.Step(pb.Message{From: 2, To: 1, MsgType: pb.MessageType_MsgAppend, Term: 2, LogTerm: tt.term, Index: tt.index}) // 模拟leader2 给节点1发送一个MsgApend，附带prevLogIndex/prevLogTerm
 
 		msgs = r.readMessages()
 		if len(msgs) != 1 {
@@ -648,6 +648,7 @@ func TestFollowerAppendEntries2AB(t *testing.T) {
 		},
 	}
 	for i, tt := range tests {
+		t.Logf("tests: %d", i)
 		storage := NewMemoryStorage()
 		storage.Append([]pb.Entry{{Term: 1, Index: 1}, {Term: 2, Index: 2}})
 		r := newTestRaft(1, []uint64{1, 2, 3}, 10, 1, storage)

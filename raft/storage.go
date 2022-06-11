@@ -88,7 +88,7 @@ type MemoryStorage struct {
 func NewMemoryStorage() *MemoryStorage {
 	return &MemoryStorage{
 		// When starting from scratch populate the list with a dummy entry at term zero.
-		ents:     make([]pb.Entry, 1),
+		ents:     make([]pb.Entry, 1), // 创建一个元素个数为1的数组切片，元素初始值为0
 		snapshot: pb.Snapshot{Metadata: &pb.SnapshotMetadata{ConfState: &pb.ConfState{}}},
 	}
 }
