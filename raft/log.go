@@ -129,7 +129,8 @@ func (l *RaftLog) maybeAppend(index, logTerm, committed uint64, ents ...pb.Entry
 	if l.matchTerm(index, logTerm) {
 		lastnewi = index + uint64(len(ents))
 
-		if len(ents) == 0 {
+		if len(ents) == 0 { // 可能是为了来提醒commit增长的
+			l.commitTo(min(committed, lastnewi))
 			return lastnewi, true
 		}
 
