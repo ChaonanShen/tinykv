@@ -86,14 +86,6 @@ func newLog(storage Storage) *RaftLog {
 	return raftLog
 }
 
-func (l *RaftLog) append(ents ...pb.Entry) uint64 {
-	if len(ents) == 0 {
-		return l.LastIndex()
-	}
-	l.entries = append(l.entries, ents...)
-	return l.LastIndex()
-}
-
 func (l *RaftLog) entriesFrom(index uint64) ([]pb.Entry, error) {
 	offset := l.entries[0].Index
 	if index > l.LastIndex() {
@@ -125,36 +117,52 @@ func (l *RaftLog) matchTerm(i, term uint64) bool {
 // maybeAppend returns (0, false) if the entries cannot be appended. Otherwise,
 // it returns (last index of new entries, true).
 func (l *RaftLog) maybeAppend(index, logTerm, committed uint64, ents ...pb.Entry) (lastnewi uint64, ok bool) {
-
 	if l.matchTerm(index, logTerm) {
 		lastnewi = index + uint64(len(ents))
-
-		if len(ents) == 0 { // 可能是为了来提醒commit增长的
-			l.commitTo(min(committed, lastnewi))
-			return lastnewi, true
+		ci := l.findConflict(ents)
+		switch {
+		case ci == 0:
+		case ci <= l.committed:
+			log.Fatal(fmt.Sprintf("entry %d conflict with committed entry [committed(%d)]", ci, l.committed))
+		default:
+			offset := index + 1
+			l.append(ents[ci-offset:]...)
 		}
-
-		var offset uint64
-		if len(l.entries) > 0 {
-			offset = l.entries[0].Index
-		}
-		if index+1 <= l.LastIndex() { // 需要切割不匹配部分
-			// 排除一种情况，传入的entries完全是已有entries的子集！那就什么都不用修改
-			li, lt := ents[len(ents)-1].Index, ents[len(ents)-1].Term
-			if li <= l.LastIndex() && l.matchTerm(li, lt) {
-				return lastnewi, true
-			}
-
-			l.entries = l.entries[:index-offset+1]
-			if l.stabled > l.LastIndex() {
-				l.stabled = l.LastIndex()
-			}
-		}
-		l.append(ents...)
 		l.commitTo(min(committed, lastnewi))
 		return lastnewi, true
 	}
 	return 0, false
+}
+
+func (l *RaftLog) append(ents ...pb.Entry) uint64 {
+	if len(ents) == 0 {
+		return l.LastIndex()
+	}
+	if after := ents[0].Index - 1; after < l.committed {
+		log.Fatal(fmt.Sprintf("after(%d) is out of range [committed(%d)]", after, l.committed))
+	}
+	l.truncateAndAppend(ents)
+	//l.maybeCompact()
+	return l.LastIndex()
+}
+
+func (l *RaftLog) truncateAndAppend(ents []pb.Entry) {
+	after := ents[0].Index
+	if after == l.LastIndex()+1 {
+		l.entries = append(l.entries, ents...)
+		return
+	}
+	// truncate to after and copy to u.entries then append
+	//log.Info(fmt.Sprintf("truncate the unstable entries before index %d", after))
+	if after-1 < l.stabled {
+		l.stabled = after - 1
+	}
+	offset := uint64(0)
+	if len(l.entries) > 0 {
+		offset = l.entries[0].Index
+	}
+	l.entries = append([]pb.Entry{}, l.entries[:after-offset]...) // 从一个空的切片数组开始append
+	l.entries = append(l.entries, ents...)
 }
 
 // findConflict finds the index of the conflict.

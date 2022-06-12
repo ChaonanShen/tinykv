@@ -309,8 +309,7 @@ func (r *Raft) sendHeartbeat(to uint64) {
 		To:      to,
 		From:    r.id,
 		Term:    r.Term,
-		Commit:  r.RaftLog.committed, // 有地方实现的时候把committed=min(r.getProgress(to).Match, r.RaftLog.committed) 这样一定不会超过follower的最大长度
-		// 我这里直接就赋值成RaftLog.committed，这样子的话处理Heartbeat的消息时候比较下commit是否超过了自身已有的entries长度（总归要么发送端处理要么接收端处理）
+		Commit:  min(r.RaftLog.committed, r.Prs[to].Match), // 可不能忘了这个发送的commit不能超过
 	})
 }
 
