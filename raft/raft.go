@@ -248,6 +248,16 @@ func newRaft(c *Config) *Raft {
 	return raft
 }
 
+func (r *Raft) softState() *SoftState { return &SoftState{Lead: r.Lead, RaftState: r.State} }
+
+func (r *Raft) hardState() pb.HardState {
+	return pb.HardState{
+		Term:   r.Term,
+		Vote:   r.Vote,
+		Commit: r.RaftLog.committed,
+	}
+}
+
 // send sends msg to other peers
 func (r *Raft) send(msg pb.Message) {
 	// 似乎应该进行必要的check，但是如果其他地方保证这个msg一定都弄完整了可能也就不用check了

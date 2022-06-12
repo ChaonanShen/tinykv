@@ -128,6 +128,10 @@ func isHardStateEqual(a, b pb.HardState) bool {
 	return a.Term == b.Term && a.Vote == b.Vote && a.Commit == b.Commit
 }
 
+func isSoftStateEqual(a, b *SoftState) bool {
+	return a.Lead == b.Lead && a.RaftState == b.RaftState
+}
+
 func transformToPointers(entries []pb.Entry) []*pb.Entry {
 	result := make([]*pb.Entry, 0, len(entries))
 	for i := range entries {

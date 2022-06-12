@@ -195,7 +195,10 @@ func (l *RaftLog) maybeCompact() {
 // unstableEntries return all the unstable entries -- 在ready中使用
 func (l *RaftLog) unstableEntries() []pb.Entry {
 	// Your Code Here (2A).
-	offset := l.entries[0].Index
+	offset := uint64(0)
+	if len(l.entries) > 0 {
+		offset = l.entries[0].Index
+	}
 	ents := make([]pb.Entry, 0) // 直接var ents []pb.Entry定义的话如果没有append任何元素会返回nil！
 	for i := l.stabled + 1; i <= l.LastIndex(); i++ {
 		ents = append(ents, l.entries[i-offset])
@@ -203,15 +206,31 @@ func (l *RaftLog) unstableEntries() []pb.Entry {
 	return ents
 }
 
+func (l *RaftLog) hasUnstableEntries() bool { // for RawNode.HasReady
+	return l.stabled < l.LastIndex()
+}
+
+// hasPendingSnapshot returns if there is pending snapshot waiting for applying.
+func (r *RaftLog) hasPendingSnapshot() bool { // for RawNode.HasReady
+	return r.pendingSnapshot != nil && !IsEmptySnap(r.pendingSnapshot)
+}
+
 // nextEnts returns all the committed but not applied entries -- 在ready中使用
 func (l *RaftLog) nextEnts() []pb.Entry {
 	// Your Code Here (2A).
-	offset := l.entries[0].Index
-	var ents []pb.Entry
+	offset := uint64(0)
+	if len(l.entries) > 0 {
+		offset = l.entries[0].Index
+	}
+	ents := make([]pb.Entry, 0)
 	for i := l.applied + 1; i <= l.committed; i++ {
 		ents = append(ents, l.entries[i-offset])
 	}
 	return ents
+}
+
+func (l *RaftLog) hasCommittedEntries() bool { // for RawNode.HasReady
+	return l.applied < l.committed
 }
 
 // LastIndex return the last index of the log entries
