@@ -627,7 +627,7 @@ func (r *Raft) forEachProgress(f func(id uint64, pr *Progress)) {
 
 func (r *Raft) campaign() {
 	r.becomeCandidate()
-	if len(r.Prs) == 1 { // 如果只有一个节点，直接变成leader   而且不需要加上noop entry
+	if len(r.Prs) == 1 { // 如果只有一个节点，直接变成leader
 		r.becomeLeader()
 		return
 	}
@@ -637,7 +637,7 @@ func (r *Raft) campaign() {
 			continue
 		}
 		r.send(pb.Message{MsgType: pb.MessageType_MsgRequestVote, To: to, From: r.id, Term: r.Term,
-			LogTerm: r.RaftLog.lastTerm(), Index: r.RaftLog.lastTerm()})
+			LogTerm: r.RaftLog.lastTerm(), Index: r.RaftLog.LastIndex()}) // 我的天那，Index居然赋值成了r.RaftLog.lastTerm()，居然到project2ab的最后才发现
 	}
 }
 

@@ -916,16 +916,16 @@ func TestHeartbeatUpdateCommit2AB(t *testing.T) {
 		sm3 := newTestRaft(1, []uint64{1, 2, 3}, 10, 1, NewMemoryStorage())
 		nt := newNetwork(sm1, sm2, sm3)
 		nt.send(pb.Message{From: 1, To: 1, MsgType: pb.MessageType_MsgHup})
-		nt.isolate(1)
+		nt.isolate(1) // 1被隔离了
 		// propose log to old leader should fail
 		for i := 0; i < tt.failCnt; i++ {
 			nt.send(pb.Message{From: 1, To: 1, MsgType: pb.MessageType_MsgPropose, Entries: []*pb.Entry{{}}})
 		}
-		if sm1.RaftLog.committed > 1 {
+		if sm1.RaftLog.committed > 1 { // 被隔离的1不应该有任何commit，只有当选leader的noop entry的commit
 			t.Fatalf("#%d: unexpected commit: %d", i, sm1.RaftLog.committed)
 		}
 		// propose log to cluster should success
-		nt.send(pb.Message{From: 2, To: 2, MsgType: pb.MessageType_MsgHup})
+		nt.send(pb.Message{From: 2, To: 2, MsgType: pb.MessageType_MsgHup}) // 2变成new leader
 		for i := 0; i < tt.successCnt; i++ {
 			nt.send(pb.Message{From: 2, To: 2, MsgType: pb.MessageType_MsgPropose, Entries: []*pb.Entry{{}}})
 		}
@@ -938,7 +938,7 @@ func TestHeartbeatUpdateCommit2AB(t *testing.T) {
 		}
 
 		nt.recover()
-		nt.ignore(pb.MessageType_MsgAppend)
+		nt.ignore(pb.MessageType_MsgAppend) // 发不了MsgAppend，日志就同步不了
 		nt.send(pb.Message{From: 2, To: 2, MsgType: pb.MessageType_MsgBeat})
 		if sm1.RaftLog.committed > 1 {
 			t.Fatalf("#%d: expected sm1 commit: 1, got: %d", i, sm1.RaftLog.committed)
