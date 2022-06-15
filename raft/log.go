@@ -32,6 +32,15 @@ type RaftLog struct {
 	// storage contains all stable entries since the last snapshot.
 	storage Storage
 
+	// offset = logical_index - slice_index (只要有entries，这个公式一定成立)
+	// if len(entries) != 0 --> offset = entries[0].Index
+	// if len(entries) == 0 --> offsett = applyState.TruncatedState.Index+1 （之后追加entries后，依然有offset==entries[0].Index）
+	offset uint64
+	// TODO: 之后截断日志的时候要修改offset，当然同时也要修改applyState.TrucatedState.Index
+
+	truncatedIndex uint64 // truncatedIndex+1 == offset
+	truncatedTerm  uint64
+
 	// committed is the highest log position that is known to be in
 	// stable storage on a quorum of nodes.
 	committed uint64
@@ -76,6 +85,9 @@ func newLog(storage Storage) *RaftLog {
 	if err != nil {
 		panic(err)
 	}
+	raftLog.offset = firstIndex // peerstorage中FirstIndex()==truncatedIndex()+1
+	raftLog.truncatedIndex = firstIndex - 1
+	raftLog.truncatedTerm, _ = storage.Term(firstIndex - 1)
 
 	raftLog.entries = entries
 	raftLog.stabled = lastIndex
@@ -87,14 +99,13 @@ func newLog(storage Storage) *RaftLog {
 }
 
 func (l *RaftLog) entriesFrom(index uint64) ([]pb.Entry, error) {
-	offset := l.entries[0].Index
 	if index > l.LastIndex() {
 		return nil, nil
 	}
 	var ents []pb.Entry
 
 	for i := index; i <= l.LastIndex(); i++ {
-		ents = append(ents, l.entries[i-offset]) // logic_index - offset = slice_index
+		ents = append(ents, l.entries[i-l.offset]) // logic_index - offset = slice_index
 	}
 	return ents, nil
 }
@@ -157,11 +168,7 @@ func (l *RaftLog) truncateAndAppend(ents []pb.Entry) {
 	if after-1 < l.stabled {
 		l.stabled = after - 1
 	}
-	offset := uint64(0)
-	if len(l.entries) > 0 {
-		offset = l.entries[0].Index
-	}
-	l.entries = append([]pb.Entry{}, l.entries[:after-offset]...) // 从一个空的切片数组开始append
+	l.entries = append([]pb.Entry{}, l.entries[:after-l.offset]...) // 从一个空的切片数组开始append
 	l.entries = append(l.entries, ents...)
 }
 
@@ -195,13 +202,9 @@ func (l *RaftLog) maybeCompact() {
 // unstableEntries return all the unstable entries -- 在ready中使用
 func (l *RaftLog) unstableEntries() []pb.Entry {
 	// Your Code Here (2A).
-	offset := uint64(0)
-	if len(l.entries) > 0 {
-		offset = l.entries[0].Index
-	}
 	ents := make([]pb.Entry, 0) // 直接var ents []pb.Entry定义的话如果没有append任何元素会返回nil！
 	for i := l.stabled + 1; i <= l.LastIndex(); i++ {
-		ents = append(ents, l.entries[i-offset])
+		ents = append(ents, l.entries[i-l.offset])
 	}
 	return ents
 }
@@ -218,13 +221,9 @@ func (r *RaftLog) hasPendingSnapshot() bool { // for RawNode.HasReady
 // nextEnts returns all the committed but not applied entries -- 在ready中使用
 func (l *RaftLog) nextEnts() []pb.Entry {
 	// Your Code Here (2A).
-	offset := uint64(0)
-	if len(l.entries) > 0 {
-		offset = l.entries[0].Index
-	}
 	ents := make([]pb.Entry, 0)
 	for i := l.applied + 1; i <= l.committed; i++ {
-		ents = append(ents, l.entries[i-offset])
+		ents = append(ents, l.entries[i-l.offset])
 	}
 	return ents
 }
@@ -238,12 +237,15 @@ func (l *RaftLog) hasCommittedEntries() bool { // for RawNode.HasReady
 func (l *RaftLog) LastIndex() uint64 { // 最初的话RaftLog.Entries是空的
 	// Your Code Here (2A).
 	if len(l.entries) == 0 {
-		return 0
+		return l.truncatedIndex // project2b才发现的一个大坑！
 	}
 	return l.entries[len(l.entries)-1].Index
 }
 
-func (l *RaftLog) lastTerm() uint64 { // 但是可能会返回entry[0]这个dummy entry的term（如果没有截断就是0）
+func (l *RaftLog) lastTerm() uint64 {
+	if len(l.entries) == 0 { // truncated term
+		return l.truncatedTerm
+	}
 	term, _ := l.Term(l.LastIndex()) // Term要保证像lastIndex这样合理位置一定能有一个正确的结果!其他错误位置可能会出问题
 	return term
 }
@@ -252,17 +254,16 @@ func (l *RaftLog) lastTerm() uint64 { // 但是可能会返回entry[0]这个dumm
 // 要让prevLogTerm能通过Term(prevLogIndex)获取
 func (l *RaftLog) Term(i uint64) (uint64, error) { // i->logic index   logic_index - offset = slice_index
 	// Your Code Here (2A).
-	if len(l.entries) == 0 || i == 0 {
-		return 0, nil
+	if i == l.truncatedIndex {
+		return l.truncatedTerm, nil
 	}
-	offset := l.entries[0].Index // 如果是没有compact情况下的话offset就是1 -- debug看看是不是
-	if i < offset {
+	if i < l.offset {
 		return 0, ErrCompacted
 	}
 	if i > l.LastIndex() {
 		return 0, ErrUnavailable
 	}
-	return l.entries[i-offset].Term, nil
+	return l.entries[i-l.offset].Term, nil
 }
 
 func (l *RaftLog) appliedTo(toapply uint64) {
