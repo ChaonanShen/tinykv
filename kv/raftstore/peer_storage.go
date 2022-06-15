@@ -305,13 +305,6 @@ func ClearMeta(engines *engine_util.Engines, kvWB, raftWB *engine_util.WriteBatc
 	return nil
 }
 
-// Append the given entries to the raft log and update ps.raftState also delete log entries that will
-// never be committed
-func (ps *PeerStorage) Append(entries []eraftpb.Entry, raftWB *engine_util.WriteBatch) error {
-	// Your Code Here (2B).
-	return nil
-}
-
 // Apply the peer with given snapshot
 func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_util.WriteBatch, raftWB *engine_util.WriteBatch) (*ApplySnapResult, error) {
 	log.Infof("%v begin to apply snapshot", ps.Tag)
@@ -327,11 +320,73 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 	return nil, nil
 }
 
+// Append the given entries to the raft log and update ps.raftState also delete log entries that will
+// never be committed
+func (ps *PeerStorage) Append(entries []eraftpb.Entry, raftWB *engine_util.WriteBatch) error { // entries必然非空
+	// Your Code Here (2B).
+
+	lastentry := entries[len(entries)-1]
+
+	deleteStartIndex := lastentry.Index + 1
+
+	for i := deleteStartIndex; i <= ps.raftState.LastIndex; i++ {
+		raftWB.DeleteMeta(meta.RaftLogKey(ps.region.Id, i)) // maybe should check return err
+	}
+	for _, entry := range entries {
+		err := raftWB.SetMeta(meta.RaftLogKey(ps.region.Id, entry.Index), &entry) // SetMeta中会帮忙Marshal()
+		// 为什么传入的是指针&entry，哪里会读出这个entry ———— 在GetRaftEntry中也是读取指针出来的
+		if err != nil {
+			return err
+		}
+	}
+
+	ps.raftState.LastIndex = lastentry.Index
+	ps.raftState.LastTerm = lastentry.Term // update part of RaftLocalState
+	return nil
+}
+
 // Save memory states to disk.
 // Do not modify ready in this function, this is a requirement to advance the ready object properly later.
 func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, error) {
 	// Hint: you may call `Append()` and `ApplySnapshot()` in this function
 	// Your Code Here (2B/2C).
+
+	// 1.调用Append将所有unstabled entries持久化
+	// 注意先持久化unstabled entries再修改raftState，因为持久化unstabled entries需要用到raftState中的信息
+	// 2.修改raftState(RaftLocalState) raftDB修改 - 1.HardState(Term/Vote/Commit) 2.LastIndex/LastTerm(最后一个entry信息) -- 所以说hardstate或者unstabled entries任一个改变了就要修改
+	// 3.snapshot相关之后处理 RaftApplyState这里不用管，在commit entries时候一起修改 RaftApplyState里面也有snapshot相关信息
+
+	raftWB := new(engine_util.WriteBatch)
+	//kvWB := new(engine_util.WriteBatch)
+
+	// entries的LastTerm/LastIndex和HardState都在RaftLocalState中
+	if len(ready.Entries) > 0 {
+		err := ps.Append(ready.Entries, raftWB) // 这里面要使用raftState的LastIndex LastTerm来判断哪些已经持久化的entries需要删除
+		if err != nil {
+			return nil, err
+		}
+	}
+	if !raft.IsEmptyHardState(ready.HardState) { // update part of RaftLocalState
+		ps.raftState.HardState = &ready.HardState
+	}
+
+	err := raftWB.SetMeta(meta.RaftStateKey(ps.region.Id), ps.raftState) // GetRaftLocalState中读取这个状态
+	if err != nil {
+		return nil, err
+	}
+	// TODO: snapshot & RaftApplyState
+
+	//err = kvWB.WriteToDB(ps.Engines.Kv)
+	//if err != nil {
+	//	return nil, err
+	//}
+	// TODO: 如果在这个位置程序崩溃，会不会导致raftDB和kvDB数据不一致？？？
+	// KvWB和raftWB写入先后顺序有没有关系？
+	err = raftWB.WriteToDB(ps.Engines.Raft)
+	if err != nil {
+		return nil, err
+	}
+
 	return nil, nil
 }
 

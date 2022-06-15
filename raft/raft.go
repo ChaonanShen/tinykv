@@ -228,10 +228,10 @@ func newRaft(c *Config) *Raft {
 
 	// 修正hardState-commit/vote/term
 	if !IsEmptyHardState(hardState) {
-		// check commit
-		if hardState.Commit < raft.RaftLog.committed || hardState.Commit > raft.RaftLog.LastIndex() { // 此时RaftLog.committed还只是firstIndex-1
-			log.Fatal(fmt.Sprintf("%d state.commit %d is out of range [%d, %d]", raft.id, hardState.Commit, raft.RaftLog.committed, raft.RaftLog.LastIndex()))
-		}
+		// check commit // 这段检查不知道是那里来的？？？
+		//if hardState.Commit < raft.RaftLog.committed || hardState.Commit > raft.RaftLog.LastIndex() { // 此时RaftLog.committed还只是firstIndex-1
+		//	log.Fatal(fmt.Sprintf("%d state.commit %d is out of range [%d, %d]", raft.id, hardState.Commit, raft.RaftLog.committed, raft.RaftLog.LastIndex()))
+		//}
 		raft.RaftLog.committed = hardState.Commit
 		raft.Term = hardState.Term
 		raft.Vote = hardState.Vote
@@ -360,7 +360,7 @@ func (r *Raft) becomeFollower(term uint64, lead uint64) {
 	r.reset(term)
 	r.State = StateFollower
 	r.Lead = lead
-	//log.Info(fmt.Sprintf("[%d](term %d) became follower", r.id, r.Term))
+	//log.Infof("[raft %d](term %d) became follower", r.id, r.Term)
 }
 
 // becomeCandidate transform this peer's state to candidate
@@ -371,7 +371,7 @@ func (r *Raft) becomeCandidate() { // 只做一些基本的状态改变，发起
 	r.Vote = r.id        // vote for itself
 	r.votes[r.id] = true // vote for itself
 	// already reset election timeout in r.reset
-	//log.Info(fmt.Sprintf("[%d](term %d) became candidate", r.id, r.Term))
+	//log.Info("[raft %d](term %d) became candidate", r.id, r.Term)
 }
 
 // becomeLeader transform this peer's state to leader
@@ -393,7 +393,7 @@ func (r *Raft) becomeLeader() {
 	noopEntry := pb.Entry{Data: nil}
 	r.appendEntry(noopEntry) // 追加entries，并且相应修改Progress&commit
 
-	//log.Info(fmt.Sprintf("[%d](term %d) became leader", r.id, r.Term))
+	log.Infof("[raft %d](term %d) became leader", r.id, r.Term)
 }
 
 func (r *Raft) appendEntry(es ...pb.Entry) {

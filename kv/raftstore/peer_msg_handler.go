@@ -2,6 +2,9 @@ package raftstore
 
 import (
 	"fmt"
+	"github.com/pingcap-incubator/tinykv/kv/raftstore/meta"
+	"github.com/pingcap-incubator/tinykv/kv/util/engine_util"
+	"github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 	"time"
 
 	"github.com/Connor1996/badger/y"
@@ -43,6 +46,120 @@ func (d *peerMsgHandler) HandleRaftReady() {
 		return
 	}
 	// Your Code Here (2B).
+	if !d.RaftGroup.HasReady() {
+		return // 当前节点不需要处理ready
+	}
+	rd := d.RaftGroup.Ready()
+	// 调用ps.SaveReadyState持久化log entries和一些元数据
+	// 里面可能持久化unstabled entries / RaftLocalState(HardState(Term/Vote/Commit)/LastIndex/LastTerm) / RaftApplyState(AppliedIndex/Snapshot信息)&Snapshot的apply
+	_, err := d.peerStorage.SaveReadyState(&rd) // 返回的ApplySnapResult目前不使用
+	if err != nil {
+		panic(err)
+	}
+	// 发送消息
+	d.Send(d.ctx.trans, rd.Messages)
+	// apply committed entries -- 每一个entry apply到kvDB后都要
+	for _, entry := range rd.CommittedEntries {
+		kvWB := new(engine_util.WriteBatch)
+		d.peerStorage.applyState.AppliedIndex = entry.Index
+		err := kvWB.SetMeta(meta.ApplyStateKey(d.regionId), d.peerStorage.applyState)
+		if err != nil {
+			panic(err)
+		}
+		d.process(&entry, kvWB) // process中进行WriteToDB
+	}
+
+	// call RaftGroup(RawNode).Advance推进raft状态机状态
+	d.RaftGroup.Advance(rd)
+}
+
+func (d *peerMsgHandler) process(entry *eraftpb.Entry, kvWB *engine_util.WriteBatch) {
+	if entry.EntryType == eraftpb.EntryType_EntryNormal {
+		request := new(raft_cmdpb.RaftCmdRequest) // RaftCmdRequest是在RaftStorage.Write/Reader中生成的（可能来自其他peers），直到这里终于开始处理
+		err := request.Unmarshal(entry.Data)
+		if err != nil {
+			panic(err)
+		}
+		if request.AdminRequest == nil {
+			d.processNormal(entry, request.Requests, kvWB)
+		} else {
+			d.processAdmin(entry, request.AdminRequest, kvWB)
+		}
+	} else { // eraftpb.EntryType_EntryConfChange
+
+	}
+}
+
+func (d *peerMsgHandler) processNormal(entry *eraftpb.Entry, requests []*raft_cmdpb.Request, kvWB *engine_util.WriteBatch) {
+	// 只有put/delete需要在WriteBatch中处理
+	for _, request := range requests {
+		switch request.CmdType {
+		case raft_cmdpb.CmdType_Put:
+			kvWB.SetCF(request.Put.Cf, request.Put.Key, request.Put.Value)
+		case raft_cmdpb.CmdType_Delete:
+			kvWB.DeleteCF(request.Delete.Cf, request.Delete.Key)
+		}
+	}
+	// 对[]*raft_cmdpb.Request中每个请求作出回复，最后通过保存在proposals中的callback.Done返回给客户端
+	for len(d.proposals) > 0 && d.proposals[0].index < entry.Index { // remove stale proposals
+		// stale cmd
+		p := d.proposals[0]
+		d.proposals = d.proposals[1:]
+		NotifyStaleReq(p.index, p.cb)
+	}
+
+	if len(d.proposals) > 0 && d.proposals[0].index == entry.Index { // 找到了entry对应的proposal
+		p := d.proposals[0]
+		d.proposals = d.proposals[1:]
+		if entry.Term == p.term { //
+			raftCmdResponse := &raft_cmdpb.RaftCmdResponse{
+				Header: &raft_cmdpb.RaftResponseHeader{CurrentTerm: d.Term()}, // Write/Reader的checkResponse中会检查resp.Heder.Error != nil，所以我想这个Header必须要不是ni
+			}
+			var responses []*raft_cmdpb.Response
+			for _, request := range requests { // 实际上requests中要么都是读，要么都是写 不会有读写混合
+				resp := new(raft_cmdpb.Response)
+				switch request.CmdType {
+				case raft_cmdpb.CmdType_Put:
+					responses = append(responses, &raft_cmdpb.Response{
+						CmdType: raft_cmdpb.CmdType_Put,
+						Put:     &raft_cmdpb.PutResponse{},
+					})
+				case raft_cmdpb.CmdType_Delete:
+					responses = append(responses, &raft_cmdpb.Response{
+						CmdType: raft_cmdpb.CmdType_Delete,
+						Delete:  &raft_cmdpb.DeleteResponse{},
+					})
+				case raft_cmdpb.CmdType_Get:
+					val, _ := engine_util.GetCF(d.ctx.engine.Kv, request.Get.Cf, request.Get.Key)
+					responses = append(responses, &raft_cmdpb.Response{
+						CmdType: raft_cmdpb.CmdType_Get,
+						Get:     &raft_cmdpb.GetResponse{Value: val},
+					})
+				case raft_cmdpb.CmdType_Snap: // 返回一个txn
+					responses = append(responses, &raft_cmdpb.Response{
+						CmdType: raft_cmdpb.CmdType_Snap,
+						Snap:    &raft_cmdpb.SnapResponse{Region: d.Region()},
+					})
+					p.cb.Txn = d.ctx.engine.Kv.NewTransaction(false)
+				default:
+					log.Fatal("unknown CmdType")
+				}
+				responses = append(responses, resp)
+			}
+			raftCmdResponse.Responses = responses
+			kvWB.WriteToDB(d.ctx.engine.Kv)
+
+			p.cb.Done(raftCmdResponse)
+			return // 避免重复WriteToDB
+		} else { // 不知道为啥term匹配不上
+			NotifyStaleReq(p.term, p.cb)
+		}
+	}
+	kvWB.WriteToDB(d.ctx.engine.Kv)
+}
+
+func (d *peerMsgHandler) processAdmin(entry *eraftpb.Entry, adminRequest *raft_cmdpb.AdminRequest, kvWB *engine_util.WriteBatch) {
+
 }
 
 func (d *peerMsgHandler) HandleMsg(msg message.Msg) {
@@ -114,6 +231,27 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 		return
 	}
 	// Your Code Here (2B).
+	index := d.RaftGroup.Raft.RaftLog.LastIndex() + 1
+	data, err := msg.Marshal() // 序列化msg 为什么要进行Marshal这步哪里的文档说的？好像也是直接看代码得来的？
+	if err != nil {
+		cb.Done(ErrResp(err))
+		return
+	}
+	err = d.RaftGroup.Propose(data)
+	if err != nil {
+		cb.Done(ErrResp(err))
+		return
+	}
+	if index == d.RaftGroup.Raft.RaftLog.LastIndex()+1 {
+		cb.Done(ErrResp(&util.ErrNotLeader{RegionId: d.regionId}))
+		return
+	}
+	// propose成功，将callback记录入peer.proposal中
+	d.proposals = append(d.proposals, &proposal{
+		index: index,
+		term:  d.Term(),
+		cb:    cb,
+	})
 }
 
 func (d *peerMsgHandler) onTick() {

@@ -114,7 +114,7 @@ func (rs *RaftStorage) Write(ctx *kvrpcpb.Context, batch []storage.Modify) error
 		return err
 	}
 
-	return rs.checkResponse(cb.WaitResp(), len(reqs))
+	return rs.checkResponse(cb.WaitResp(), len(reqs)) // 这些写命令的response好像只是空的，只是检查下有没有response和request数量不匹配或者Header error
 }
 
 func (rs *RaftStorage) Reader(ctx *kvrpcpb.Context) (storage.StorageReader, error) {

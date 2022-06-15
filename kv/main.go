@@ -45,7 +45,7 @@ func main() {
 	}
 
 	log.SetLevelByString(conf.LogLevel)
-	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds | log.Lshortfile)
+	log.SetFlags(log.Ltime | log.Lmicroseconds | log.Lshortfile)
 	log.Infof("Server started with conf %+v", conf)
 
 	var storage storage.Storage
