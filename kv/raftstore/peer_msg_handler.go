@@ -117,7 +117,6 @@ func (d *peerMsgHandler) processNormal(entry *eraftpb.Entry, requests []*raft_cm
 			}
 			var responses []*raft_cmdpb.Response
 			for _, request := range requests { // 实际上requests中要么都是读，要么都是写 不会有读写混合
-				resp := new(raft_cmdpb.Response)
 				switch request.CmdType {
 				case raft_cmdpb.CmdType_Put:
 					responses = append(responses, &raft_cmdpb.Response{
@@ -144,7 +143,6 @@ func (d *peerMsgHandler) processNormal(entry *eraftpb.Entry, requests []*raft_cm
 				default:
 					log.Fatal("unknown CmdType")
 				}
-				responses = append(responses, resp)
 			}
 			raftCmdResponse.Responses = responses
 			kvWB.WriteToDB(d.ctx.engine.Kv)
