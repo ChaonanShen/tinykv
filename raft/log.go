@@ -118,8 +118,9 @@ func (l *RaftLog) maybeCommit(maxIndex, term uint64) bool {
 	return false
 }
 
-func (l *RaftLog) matchTerm(i, term uint64) bool {
-	if t, err := l.Term(i); err == nil {
+// matchTerm 注意matchTerm里面会把第一个参数index转换为term进行比较
+func (l *RaftLog) matchTerm(index, term uint64) bool {
+	if t, err := l.Term(index); err == nil {
 		return t == term
 	}
 	return false
@@ -149,9 +150,7 @@ func (l *RaftLog) append(ents ...pb.Entry) uint64 {
 	if len(ents) == 0 {
 		return l.LastIndex()
 	}
-	//if after := ents[0].Index - 1; after < l.committed { // 我这里不应该有这个问题，因为txy代码是只要commit就立刻compact掉
-	//	log.Fatal(fmt.Sprintf("after(%d) is out of range [committed(%d)]", after, l.committed))
-	//}
+
 	l.truncateAndAppend(ents)
 	//l.maybeCompact()
 	return l.LastIndex()

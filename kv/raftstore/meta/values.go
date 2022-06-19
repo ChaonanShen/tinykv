@@ -52,7 +52,7 @@ func InitRaftLocalState(raftEngine *badger.DB, region *metapb.Region) (*rspb.Raf
 	if err != nil && err != badger.ErrKeyNotFound {
 		return nil, err
 	}
-	if err == badger.ErrKeyNotFound {
+	if err == badger.ErrKeyNotFound { // 如果没有找到对应RaftLocalState
 		raftState = new(rspb.RaftLocalState)
 		raftState.HardState = new(eraftpb.HardState)
 		if len(region.Peers) > 0 {
@@ -66,6 +66,7 @@ func InitRaftLocalState(raftEngine *badger.DB, region *metapb.Region) (*rspb.Raf
 				return raftState, err
 			}
 		}
+		// 如果len(region.Peers) == 0 --> 全部index/term/commit都直接初始化为0
 	}
 	return raftState, nil
 }

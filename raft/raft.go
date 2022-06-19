@@ -119,7 +119,7 @@ func (pr *Progress) MaybeDecrTo(index uint64) bool {
 	if pr.Next-1 != index {
 		return false
 	}
-
+	// rejection后next每次其实只回退1（相当于每次next-=1）
 	pr.Next = max(index, 1)
 	return true
 }
@@ -228,10 +228,6 @@ func newRaft(c *Config) *Raft {
 
 	// 修正hardState-commit/vote/term
 	if !IsEmptyHardState(hardState) {
-		// check commit // 这段检查不知道是那里来的？？？
-		//if hardState.Commit < raft.RaftLog.committed || hardState.Commit > raft.RaftLog.LastIndex() { // 此时RaftLog.committed还只是firstIndex-1
-		//	log.Fatal(fmt.Sprintf("%d state.commit %d is out of range [%d, %d]", raft.id, hardState.Commit, raft.RaftLog.committed, raft.RaftLog.LastIndex()))
-		//}
 		raft.RaftLog.committed = hardState.Commit
 		raft.Term = hardState.Term
 		raft.Vote = hardState.Vote
@@ -284,20 +280,21 @@ func (r *Raft) sendAppend(to uint64) bool {
 	term, errt := r.RaftLog.Term(pr.Next - 1)
 	ents, erre := r.RaftLog.entriesFrom(pr.Next)
 
-	if errt != nil || erre != nil {
+	if errt != nil || erre != nil { // need to send snapshot
 		return false
+	} else {
+		m := pb.Message{
+			MsgType: pb.MessageType_MsgAppend,
+			To:      to,
+			From:    r.id,
+			Term:    r.Term,
+			Index:   pr.Next - 1, // prevLogIndex
+			LogTerm: term,
+			Entries: transformToPointers(ents),
+			Commit:  r.RaftLog.committed,
+		}
+		r.send(m)
 	}
-	m := pb.Message{
-		MsgType: pb.MessageType_MsgAppend,
-		To:      to,
-		From:    r.id,
-		Term:    r.Term,
-		Index:   pr.Next - 1, // prevLogIndex
-		LogTerm: term,
-		Entries: transformToPointers(ents),
-		Commit:  r.RaftLog.committed,
-	}
-	r.send(m)
 	return true
 }
 

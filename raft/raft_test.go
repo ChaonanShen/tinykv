@@ -324,7 +324,7 @@ func TestCommitWithoutNewTermEntry2AB(t *testing.T) {
 	tt := newNetwork(nil, nil, nil, nil, nil)
 	tt.send(pb.Message{From: 1, To: 1, MsgType: pb.MessageType_MsgHup})
 
-	// 0 cannot reach 2,3,4
+	// 1 cannot reach 3,4,5  only can reach 2
 	tt.cut(1, 3)
 	tt.cut(1, 4)
 	tt.cut(1, 5)
@@ -332,6 +332,7 @@ func TestCommitWithoutNewTermEntry2AB(t *testing.T) {
 	tt.send(pb.Message{From: 1, To: 1, MsgType: pb.MessageType_MsgPropose, Entries: []*pb.Entry{{Data: []byte("some data")}}})
 	tt.send(pb.Message{From: 1, To: 1, MsgType: pb.MessageType_MsgPropose, Entries: []*pb.Entry{{Data: []byte("some data")}}})
 
+	// 只有2能收到1发出的两个propose，3 4 5都无法收到
 	sm := tt.peers[1].(*Raft)
 	if sm.RaftLog.committed != 1 {
 		t.Errorf("committed = %d, want %d", sm.RaftLog.committed, 1)

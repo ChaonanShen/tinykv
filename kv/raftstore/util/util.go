@@ -16,7 +16,7 @@ import (
 const RaftInvalidIndex uint64 = 0
 const InvalidID uint64 = 0
 
-/// `is_initial_msg` checks whether the `msg` can be used to initialize a new peer or not.
+// IsInitialMsg checks whether the `msg` can be used to initialize a new peer or not.
 // There could be two cases:
 // 1. Target peer already exists but has not established communication with leader yet
 // 2. Target peer is added newly due to member change or region split, but it's not
@@ -68,7 +68,7 @@ func IsVoteMessage(msg *eraftpb.Message) bool {
 	return tp == eraftpb.MessageType_MsgRequestVote
 }
 
-/// `is_first_vote_msg` checks `msg` is the first vote message or not. It's used for
+// IsFirstVoteMessage  checks `msg` is the first vote message or not. It's used for
 /// when the message is received but there is no such region in `Store::region_peers` and the
 /// region overlaps with others. In this case we should put `msg` into `pending_votes` instead of
 /// create the peer.

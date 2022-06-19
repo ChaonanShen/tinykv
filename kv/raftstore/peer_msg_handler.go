@@ -58,7 +58,7 @@ func (d *peerMsgHandler) HandleRaftReady() {
 	}
 	// 发送消息
 	d.Send(d.ctx.trans, rd.Messages)
-	// apply committed entries -- 每一个entry apply到kvDB后都要
+	// apply committed entries -- 每一个entry apply到kvDB后都要同时原子修改applyState.AppliedIndex以保证apply safety（来自txy博客）
 	for _, entry := range rd.CommittedEntries {
 		kvWB := new(engine_util.WriteBatch)
 		d.peerStorage.applyState.AppliedIndex = entry.Index
@@ -100,6 +100,9 @@ func (d *peerMsgHandler) processNormal(entry *eraftpb.Entry, requests []*raft_cm
 			kvWB.DeleteCF(request.Delete.Cf, request.Delete.Key)
 		}
 	}
+
+	// 如果是follower节点进行apply，那就会直接跳过对proposals的处理（因为根本没有对应的proposal，只有leader节点有对应的proposal等待callback）
+
 	// 对[]*raft_cmdpb.Request中每个请求作出回复，最后通过保存在proposals中的callback.Done返回给客户端
 	for len(d.proposals) > 0 && d.proposals[0].index < entry.Index { // remove stale proposals
 		// stale cmd

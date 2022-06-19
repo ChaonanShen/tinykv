@@ -86,7 +86,7 @@ func (ps *PeerStorage) InitialState() (eraftpb.HardState, eraftpb.ConfState, err
 	return *raftState.HardState, util.ConfStateFromRegion(ps.region), nil
 }
 
-// 返回范围 [low, hi) 直接从kvDB中读取
+// Entries 返回范围 [low, hi) 直接从kvDB中读取 -- 要保证[low, hi)范围必须是在kvDB中的确有entry存在（比如之后snapshot会删除一些截断的entries）
 func (ps *PeerStorage) Entries(low, high uint64) ([]eraftpb.Entry, error) {
 	if err := ps.checkRange(low, high); err != nil || low == high {
 		return nil, err
