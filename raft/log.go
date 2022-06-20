@@ -98,12 +98,23 @@ func newLog(storage Storage) *RaftLog {
 	return raftLog
 }
 
+func (l *RaftLog) snapshot() (pb.Snapshot, error) {
+	if l.pendingSnapshot != nil { // 有leader发来的snapshot，就不用自己生成了
+		return *l.pendingSnapshot, nil
+	}
+	return l.storage.Snapshot()
+}
+
+// 返回从index开始到RaftLog最末尾的所有entries
 func (l *RaftLog) entriesFrom(index uint64) ([]pb.Entry, error) {
 	if index > l.LastIndex() {
 		return nil, nil
 	}
-	var ents []pb.Entry
+	if index < l.offset {
+		return nil, ErrCompacted
+	}
 
+	var ents []pb.Entry
 	for i := index; i <= l.LastIndex(); i++ {
 		ents = append(ents, l.entries[i-l.offset]) // logic_index - offset = slice_index
 	}
@@ -198,47 +209,22 @@ func (l *RaftLog) maybeCompact() {
 	// Your Code Here (2C).
 }
 
-// unstableEntries return all the unstable entries -- 在ready中使用
-func (l *RaftLog) unstableEntries() []pb.Entry {
-	// Your Code Here (2A).
-	ents := make([]pb.Entry, 0) // 直接var ents []pb.Entry定义的话如果没有append任何元素会返回nil！
-	for i := l.stabled + 1; i <= l.LastIndex(); i++ {
-		ents = append(ents, l.entries[i-l.offset])
-	}
-	return ents
-}
-
-func (l *RaftLog) hasUnstableEntries() bool { // for RawNode.HasReady
-	return l.stabled < l.LastIndex()
-}
-
-// hasPendingSnapshot returns if there is pending snapshot waiting for applying.
-func (r *RaftLog) hasPendingSnapshot() bool { // for RawNode.HasReady
-	return r.pendingSnapshot != nil && !IsEmptySnap(r.pendingSnapshot)
-}
-
-// nextEnts returns all the committed but not applied entries -- 在ready中使用
-func (l *RaftLog) nextEnts() []pb.Entry {
-	// Your Code Here (2A).
-	ents := make([]pb.Entry, 0)
-	for i := l.applied + 1; i <= l.committed; i++ {
-		ents = append(ents, l.entries[i-l.offset])
-	}
-	return ents
-}
-
-func (l *RaftLog) hasCommittedEntries() bool { // for RawNode.HasReady
-	return l.applied < l.committed
-}
-
 // LastIndex return the last index of the log entries
 // LastIndex()指的是logic index，如果还没有entries那就返回0，有一个entries就返回1
 func (l *RaftLog) LastIndex() uint64 { // 最初的话RaftLog.Entries是空的
 	// Your Code Here (2A).
-	if len(l.entries) == 0 {
-		return l.truncatedIndex // project2b才发现的一个大坑！
+	if len(l.entries) != 0 {
+		return l.entries[len(l.entries)-1].Index
 	}
-	return l.entries[len(l.entries)-1].Index
+
+	// 下面就是entries为空
+
+	// 收到来自leader的snapshot但是还没有apply
+	if l.pendingSnapshot != nil {
+		return l.pendingSnapshot.Metadata.Index
+	}
+
+	return l.truncatedIndex
 }
 
 func (l *RaftLog) lastTerm() uint64 {
@@ -284,4 +270,45 @@ func (l *RaftLog) commitTo(tocommit uint64) {
 func (l *RaftLog) isUpToDate(lastLogTerm, lastLogIndex uint64) bool {
 	lastTerm, lastIndex := l.lastTerm(), l.LastIndex()
 	return lastLogTerm > lastTerm || (lastLogTerm == lastTerm && lastLogIndex >= lastIndex)
+}
+
+// 下面这些函数在Ready/RawNode中使用
+
+// unstableEntries return all the unstable entries -- 在ready中使用
+func (l *RaftLog) unstableEntries() []pb.Entry {
+	// Your Code Here (2A).
+	ents := make([]pb.Entry, 0) // 直接var ents []pb.Entry定义的话如果没有append任何元素会返回nil！
+	for i := l.stabled + 1; i <= l.LastIndex(); i++ {
+		ents = append(ents, l.entries[i-l.offset])
+	}
+	return ents
+}
+
+func (l *RaftLog) hasUnstableEntries() bool { // for RawNode.HasReady
+	return l.stabled < l.LastIndex()
+}
+
+// hasPendingSnapshot returns if there is pending snapshot waiting for applying.
+func (r *RaftLog) hasPendingSnapshot() bool { // for RawNode.HasReady
+	return r.pendingSnapshot != nil && !IsEmptySnap(r.pendingSnapshot)
+}
+
+// nextEnts returns all the committed but not applied entries -- 在ready中使用
+func (l *RaftLog) nextEnts() []pb.Entry {
+	// Your Code Here (2A).
+	ents := make([]pb.Entry, 0)
+	for i := l.applied + 1; i <= l.committed; i++ {
+		ents = append(ents, l.entries[i-l.offset])
+	}
+	return ents
+}
+
+func (l *RaftLog) hasCommittedEntries() bool { // for RawNode.HasReady
+	return l.applied < l.committed
+}
+
+func (l *RaftLog) stableSnapTo(index uint64) { // for Raft.Advance 在apply完snapshot后将pendingSnapshot清除
+	if l.pendingSnapshot != nil && l.pendingSnapshot.Metadata.Index == index { // 避免又有个新的snapshot过来
+		l.pendingSnapshot = nil
+	}
 }

@@ -281,7 +281,21 @@ func (r *Raft) sendAppend(to uint64) bool {
 	ents, erre := r.RaftLog.entriesFrom(pr.Next) // 如果index<=ps.truncatedIndex()，会返回ErrCompact，然后就知道要发送snapshot了
 
 	if errt != nil || erre != nil { // need to send snapshot
-		return false
+		snapshot, err := r.RaftLog.snapshot()
+		if err != nil {
+			if err == ErrSnapshotTemporarilyUnavailable { // 还未生成好
+				return false
+			}
+			return false // 虽然不可能出其他错，但是就不直接panic了
+		}
+		m := pb.Message{
+			MsgType:  pb.MessageType_MsgSnapshot,
+			To:       to,
+			From:     r.id,
+			Term:     r.Term,
+			Snapshot: &snapshot,
+		}
+		r.send(m)
 	} else {
 		m := pb.Message{
 			MsgType: pb.MessageType_MsgAppend,
@@ -609,6 +623,55 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 // handleSnapshot handle Snapshot RPC request
 func (r *Raft) handleSnapshot(m pb.Message) {
 	// Your Code Here (2C).
+	snap := m.Snapshot
+	msg := pb.Message{
+		MsgType: pb.MessageType_MsgAppendResponse, To: m.From, From: r.id, Term: r.Term, Reject: false,
+	}
+	if r.restoreSnapshot(*snap) { // 成功的话就直接
+		msg.Index = r.RaftLog.LastIndex()
+	} else {
+		msg.Index = r.RaftLog.committed
+	}
+	r.send(msg)
+
+}
+
+// restore states in snapshot.Metadata
+func (r *Raft) restoreSnapshot(snap pb.Snapshot) bool { // 最好用值传递？怕遇到go语法问题，现在go底层机制还不是很熟
+
+	l := r.RaftLog
+	if snap.Metadata.Index <= l.committed { // stale snapshot，just return committed
+		return false
+	}
+	if l.matchTerm(snap.Metadata.Index, snap.Metadata.Term) { // snapshot最后一个位置也已经在当前日志中存在了，stale snapshot
+		l.commitTo(snap.Metadata.Index) // 至少说明到index位置一定是committed，否则不可能在leader里被截断
+		return false
+	}
+
+	// 以下情况可以apply这个snapshot，要把信息全部修改成只有这个snapshot，所有entries都情况（其他参数一并修改）
+
+	// 应用Metadata.Index/Term —— 相当于把当前节点改成只有
+	metaIndex, metaTerm := snap.Metadata.Index, snap.Metadata.Term
+	l.entries = nil
+	l.pendingSnapshot = &snap // 等待reay中进行apply
+	l.stabled = metaIndex
+	l.applied = metaIndex
+	l.committed = metaIndex
+	l.truncatedIndex = metaIndex
+	l.truncatedTerm = metaTerm
+	l.offset = metaIndex + 1
+
+	// 应用Metadata.ConfState —— raft中保存peers信息在Progress这个map中，所以这个map要按照confState重塑
+	r.Prs = make(map[uint64]*Progress)
+	for _, id := range snap.Metadata.ConfState.Nodes { // TODO: 其实我觉得Progress中具体值不需要设置，毕竟becomeLeader后会重新设置，而现在只是follower
+		match, next := uint64(0), l.LastIndex()+1
+		if id == r.id {
+			match = next - 1
+		}
+		r.Prs[id] = &Progress{Match: match, Next: next}
+	}
+
+	return true
 }
 
 // addNode add a new node to raft group

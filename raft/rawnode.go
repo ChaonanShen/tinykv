@@ -218,7 +218,10 @@ func (rn *RawNode) Advance(rd Ready) {
 	rn.Raft.RaftLog.stabled = rn.Raft.RaftLog.LastIndex()
 	// apply index
 	rn.Raft.RaftLog.appliedTo(rn.Raft.RaftLog.committed) // 同步apply
-	// TODO: snapshot advance
+	// snapshot advance
+	if !IsEmptySnap(&rd.Snapshot) {
+		rn.Raft.RaftLog.stableSnapTo(rd.Snapshot.Metadata.Index)
+	}
 }
 
 // GetProgress return the Progress of this node and its peers, if this

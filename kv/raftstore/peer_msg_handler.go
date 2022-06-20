@@ -50,14 +50,31 @@ func (d *peerMsgHandler) HandleRaftReady() {
 		return // 当前节点不需要处理ready
 	}
 	rd := d.RaftGroup.Ready()
+
+	if d.IsLeader() { // 根据raft博士论文10.2.1，如果是leader可以先发送msgs再持久化
+		d.Send(d.ctx.trans, rd.Messages)
+	}
+
 	// 调用ps.SaveReadyState持久化log entries和一些元数据
 	// 里面可能持久化unstabled entries / RaftLocalState(HardState(Term/Vote/Commit)/LastIndex/LastTerm) / RaftApplyState(AppliedIndex/Snapshot信息)&Snapshot的apply
-	_, err := d.peerStorage.SaveReadyState(&rd) // 返回的ApplySnapResult目前不使用
+	applyResult, err := d.peerStorage.SaveReadyState(&rd) // 返回的ApplySnapResult目前不使用
 	if err != nil {
 		panic(err)
 	}
+
 	// 发送消息
-	d.Send(d.ctx.trans, rd.Messages)
+	if !d.IsLeader() {
+		d.Send(d.ctx.trans, rd.Messages)
+	}
+
+	if applyResult != nil {
+		// change storeMeta
+		d.ctx.storeMeta.Lock()
+		defer d.ctx.storeMeta.Unlock()
+		d.ctx.storeMeta.regionRanges.ReplaceOrInsert(&regionItem{region: applyResult.Region})
+		d.ctx.storeMeta.regions[applyResult.Region.Id] = applyResult.Region
+	}
+
 	// apply committed entries -- 每一个entry apply到kvDB后都要同时原子修改applyState.AppliedIndex以保证apply safety（来自txy博客）
 	for _, entry := range rd.CommittedEntries {
 		kvWB := new(engine_util.WriteBatch)

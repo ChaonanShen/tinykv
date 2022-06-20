@@ -305,21 +305,6 @@ func ClearMeta(engines *engine_util.Engines, kvWB, raftWB *engine_util.WriteBatc
 	return nil
 }
 
-// Apply the peer with given snapshot
-func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_util.WriteBatch, raftWB *engine_util.WriteBatch) (*ApplySnapResult, error) {
-	log.Infof("%v begin to apply snapshot", ps.Tag)
-	snapData := new(rspb.RaftSnapshotData)
-	if err := snapData.Unmarshal(snapshot.Data); err != nil {
-		return nil, err
-	}
-
-	// Hint: things need to do here including: update peer storage state like raftState and applyState, etc,
-	// and send RegionTaskApply task to region worker through ps.regionSched, also remember call ps.clearMeta
-	// and ps.clearExtraData to delete stale data
-	// Your Code Here (2C).
-	return nil, nil
-}
-
 // Append the given entries to the raft log and update ps.raftState also delete log entries that will
 // never be committed
 func (ps *PeerStorage) Append(entries []eraftpb.Entry, raftWB *engine_util.WriteBatch) error { // entries必然非空
@@ -345,9 +330,73 @@ func (ps *PeerStorage) Append(entries []eraftpb.Entry, raftWB *engine_util.Write
 	return nil
 }
 
+// Apply the peer with given snapshot
+func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_util.WriteBatch, raftWB *engine_util.WriteBatch) (applyResult *ApplySnapResult, err error) {
+	log.Infof("%v begin to apply snapshot", ps.Tag)
+	snapData := new(rspb.RaftSnapshotData)
+	if err := snapData.Unmarshal(snapshot.Data); err != nil { // snapshot.Metadata会传入，snapshot.Data这里才解析出来
+		return nil, err
+	}
+	// 不过其实只需要用到snapshot.Metadata和snapData.Region，其他信息都让region worker去使用
+
+	// Hint: things need to do here including: update peer storage state like raftState and applyState, etc,
+	// and send RegionTaskApply task to region worker through ps.regionSched, also remember call ps.clearMeta
+	// and ps.clearExtraData to delete stale data
+	// Your Code Here (2C).
+
+	newRegion := snapData.Region
+	prevRegion := &metapb.Region{
+		Id:          ps.region.Id,
+		StartKey:    ps.region.StartKey,
+		EndKey:      ps.region.EndKey,
+		RegionEpoch: ps.region.RegionEpoch,
+		Peers:       ps.region.Peers,
+	}
+	applyResult.Region = newRegion
+	applyResult.PrevRegion = prevRegion
+
+	if ps.isInitialized() {
+		if err := ps.clearMeta(kvWB, raftWB); err != nil {
+			return nil, err
+		}
+		ps.clearExtraData(newRegion)
+	}
+
+	snapIndex, snapTerm := snapshot.Metadata.Index, snapshot.Metadata.Term
+
+	// RaftLocalState/RegionLocalState/RaftApplyState - ps.raftState(raftDB)/ps.Region+peerState(kvDB)/ps.applyState(kvDB)
+	ps.raftState.LastIndex = snapIndex
+	ps.raftState.LastTerm = snapTerm
+	// RaftLocalState在SaveReadyState中会使用raftWB.SetMeta持久化，这里不用重复
+
+	ps.region = newRegion
+	meta.WriteRegionState(kvWB, newRegion, rspb.PeerState_Normal)
+
+	ps.applyState.AppliedIndex = snapIndex
+	ps.applyState.TruncatedState.Index = snapIndex
+	ps.applyState.TruncatedState.Term = snapTerm
+	kvWB.SetMeta(meta.ApplyStateKey(newRegion.Id), ps.applyState)
+
+	ps.snapState.StateType = snap.SnapState_Applying
+
+	// send RegionTaskApply to region worker，并且同步等待
+
+	notifier := make(chan bool, 1)
+	ps.regionSched <- &runner.RegionTaskApply{
+		RegionId: newRegion.Id,
+		Notifier: notifier,
+		SnapMeta: snapshot.Metadata,
+		StartKey: newRegion.StartKey,
+		EndKey:   newRegion.EndKey,
+	}
+	<-notifier // 等待kv数据apply成功
+
+	return applyResult, nil
+}
+
 // Save memory states to disk.
 // Do not modify ready in this function, this is a requirement to advance the ready object properly later.
-func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, error) {
+func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (applyResult *ApplySnapResult, err error) {
 	// Hint: you may call `Append()` and `ApplySnapshot()` in this function
 	// Your Code Here (2B/2C).
 
@@ -357,11 +406,18 @@ func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, erro
 	// 3.snapshot相关之后处理 RaftApplyState这里不用管，在commit entries时候一起修改 RaftApplyState里面也有snapshot相关信息
 
 	raftWB := new(engine_util.WriteBatch)
-	//kvWB := new(engine_util.WriteBatch)
+	kvWB := new(engine_util.WriteBatch)
+
+	if !raft.IsEmptySnap(&ready.Snapshot) {
+		applyResult, err = ps.ApplySnapshot(&ready.Snapshot, kvWB, raftWB)
+		if err != nil {
+			return nil, err
+		}
+	}
 
 	// entries的LastTerm/LastIndex和HardState都在RaftLocalState中
 	if len(ready.Entries) > 0 {
-		err := ps.Append(ready.Entries, raftWB) // 这里面要使用raftState的LastIndex LastTerm来判断哪些已经持久化的entries需要删除
+		err = ps.Append(ready.Entries, raftWB) // 这里面要使用raftState的LastIndex LastTerm来判断哪些已经持久化的entries需要删除
 		if err != nil {
 			return nil, err
 		}
@@ -370,16 +426,15 @@ func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, erro
 		ps.raftState.HardState = &ready.HardState
 	}
 
-	err := raftWB.SetMeta(meta.RaftStateKey(ps.region.Id), ps.raftState) // GetRaftLocalState中读取这个状态
+	err = raftWB.SetMeta(meta.RaftStateKey(ps.region.Id), ps.raftState) // GetRaftLocalState中读取这个状态
 	if err != nil {
 		return nil, err
 	}
-	// TODO: snapshot & RaftApplyState
 
-	//err = kvWB.WriteToDB(ps.Engines.Kv)
-	//if err != nil {
-	//	return nil, err
-	//}
+	err = kvWB.WriteToDB(ps.Engines.Kv)
+	if err != nil {
+		return nil, err
+	}
 	// TODO: 如果在这个位置程序崩溃，会不会导致raftDB和kvDB数据不一致？？？
 	// KvWB和raftWB写入先后顺序有没有关系？
 	err = raftWB.WriteToDB(ps.Engines.Raft)
@@ -387,7 +442,7 @@ func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, erro
 		return nil, err
 	}
 
-	return nil, nil
+	return applyResult, nil
 }
 
 func (ps *PeerStorage) ClearData() {
