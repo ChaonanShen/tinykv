@@ -89,8 +89,8 @@ func PrepareBootstrapCluster(engines *engine_util.Engines, region *metapb.Region
 	state := new(rspb.RegionLocalState)
 	state.Region = region
 	kvWB := new(engine_util.WriteBatch)
-	kvWB.SetMeta(meta.PrepareBootstrapKey, state)
-	kvWB.SetMeta(meta.RegionStateKey(region.Id), state)
+	kvWB.SetMeta(meta.PrepareBootstrapKey, state)       // 这个是查找firstRegion的key
+	kvWB.SetMeta(meta.RegionStateKey(region.Id), state) // 这个是查找这个region的key
 	writeInitialApplyState(kvWB, region.Id)
 	err := engines.WriteKV(kvWB)
 	if err != nil {

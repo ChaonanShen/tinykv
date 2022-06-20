@@ -56,7 +56,7 @@ func (n *Node) Start(ctx context.Context, engines *engine_util.Engines, trans Tr
 		return err
 	}
 	newCluster := firstRegion != nil
-	if newCluster { // 新集群的话
+	if newCluster {
 		log.Infof("try bootstrap cluster, storeID: %d, region: %s", storeID, firstRegion)
 		newCluster, err = n.BootstrapCluster(ctx, engines, firstRegion)
 		if err != nil {
@@ -130,7 +130,7 @@ const (
 	CheckClusterBootstrapRetrySeconds     = 3
 )
 
-func (n *Node) checkClusterBootstrapped(ctx context.Context) (bool, error) {
+func (n *Node) checkClusterBootstrapped(ctx context.Context) (bool, error) { // 重复很多次检查是否bootstrapped
 	for i := 0; i < MaxCheckClusterBootstrappedRetryCount; i++ {
 		bootstrapped, err := n.schedulerClient.IsBootstrapped(ctx)
 		if err == nil {

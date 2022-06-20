@@ -45,7 +45,7 @@ func (rw *raftWorker) run(closeCh <-chan struct{}, wg *sync.WaitGroup) {
 		for i := 0; i < pending; i++ {
 			msgs = append(msgs, <-rw.raftCh)
 		}
-		peerStateMap := make(map[uint64]*peerState)
+		peerStateMap := make(map[uint64]*peerState) // 这个id->peer的map是每次新建的 --> 这样只有处理过msgs的peer会进行之后的HandleRaftReady，没有处理过消息的话就不会进行（不过至少tick是每次都有的，所以其实每次所有peers依然都要进行处理）
 		for _, msg := range msgs {
 			peerState := rw.getPeerState(peerStateMap, msg.RegionID)
 			if peerState == nil {

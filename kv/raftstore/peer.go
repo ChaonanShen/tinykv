@@ -29,7 +29,7 @@ func NotifyReqRegionRemoved(regionId uint64, cb *message.Callback) {
 	cb.Done(resp)
 }
 
-// If we create the peer actively, like bootstrap/split/merge region, we should
+// If we create the peer actively, like *bootstrap/split/merge region*, we should
 // use this function to create the peer. The region must contain the peer info
 // for this store.
 func createPeer(storeID uint64, cfg *config.Config, sched chan<- worker.Task,

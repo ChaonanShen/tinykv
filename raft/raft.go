@@ -278,7 +278,7 @@ func (r *Raft) sendAppend(to uint64) bool {
 	pr := r.Prs[to] // 惊了，之前误弄成r.Prs[r.id]!!!
 
 	term, errt := r.RaftLog.Term(pr.Next - 1)
-	ents, erre := r.RaftLog.entriesFrom(pr.Next)
+	ents, erre := r.RaftLog.entriesFrom(pr.Next) // 如果index<=ps.truncatedIndex()，会返回ErrCompact，然后就知道要发送snapshot了
 
 	if errt != nil || erre != nil { // need to send snapshot
 		return false

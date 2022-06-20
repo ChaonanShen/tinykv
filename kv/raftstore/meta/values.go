@@ -55,7 +55,7 @@ func InitRaftLocalState(raftEngine *badger.DB, region *metapb.Region) (*rspb.Raf
 	if err == badger.ErrKeyNotFound { // 如果没有找到对应RaftLocalState
 		raftState = new(rspb.RaftLocalState)
 		raftState.HardState = new(eraftpb.HardState)
-		if len(region.Peers) > 0 {
+		if len(region.Peers) > 0 { // 这个region.Peers又是那里生成
 			// new split region
 			raftState.LastIndex = RaftInitLogIndex
 			raftState.LastTerm = RaftInitLogTerm
@@ -67,6 +67,7 @@ func InitRaftLocalState(raftEngine *badger.DB, region *metapb.Region) (*rspb.Raf
 			}
 		}
 		// 如果len(region.Peers) == 0 --> 全部index/term/commit都直接初始化为0
+		// 其实就是区分了split region后初始化peer 和 add peer后初始化peer两种场景，后者信息初始化为0就是希望让leader快速发来snapshot（因为leader那边1-4的日志必定已经截断）
 	}
 	return raftState, nil
 }
@@ -84,6 +85,8 @@ func InitApplyState(kvEngine *badger.DB, region *metapb.Region) (*rspb.RaftApply
 			applyState.TruncatedState.Index = RaftInitLogIndex
 			applyState.TruncatedState.Term = RaftInitLogTerm
 		}
+		// 如果len(region.Peers) == 0 --> 初始化为0
+
 		err = engine_util.PutMeta(kvEngine, ApplyStateKey(region.Id), applyState)
 		if err != nil {
 			return applyState, err

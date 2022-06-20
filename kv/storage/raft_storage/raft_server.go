@@ -179,7 +179,7 @@ func (rs *RaftStorage) Start() error {
 	if err != nil {
 		return err
 	}
-	rs.raftRouter, rs.raftSystem = raftstore.CreateRaftstore(cfg)
+	rs.raftRouter, rs.raftSystem = raftstore.CreateRaftstore(cfg) // RaftstoreRouter & Raftstore
 
 	rs.resolveWorker = worker.NewWorker("resolver", &rs.wg)
 	resolveSender := rs.resolveWorker.Sender()
