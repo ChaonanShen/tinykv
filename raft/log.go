@@ -79,10 +79,11 @@ func newLog(storage Storage) *RaftLog {
 
 	// 从头开始的话storage.FirstIndex()==1, storage.LastIndex()==0,这样storage.Entries啥都取不到，也就是说从零开始的话entries最初是空数组
 	firstIndex, _ := storage.FirstIndex()
-	lastIndex, _ := storage.LastIndex() // 这两个函数不会返回error
-
+	lastIndex, _ := storage.LastIndex()                      // 这两个函数不会返回error
 	entries, err := storage.Entries(firstIndex, lastIndex+1) // 这样就能获取到[firstIndex, lastIndex]范围内所有entries
 	if err != nil {
+		log.Infof("In newLog firstIndex=%d lastIndex=%d", firstIndex, lastIndex)
+
 		panic(err)
 	}
 	raftLog.offset = firstIndex // peerstorage中FirstIndex()==truncatedIndex()+1
@@ -163,7 +164,7 @@ func (l *RaftLog) append(ents ...pb.Entry) uint64 {
 	}
 
 	l.truncateAndAppend(ents)
-	//l.maybeCompact()
+	l.maybeCompact() // TODO: 为啥是在这个时机进行compact？？
 	return l.LastIndex()
 }
 
@@ -205,8 +206,34 @@ func (r *RaftLog) findConflict(ents []pb.Entry) uint64 {
 // We need to compact the log entries in some point of time like
 // storage compact stabled log entries prevent the log entries
 // grow unlimitedly in memory
-func (l *RaftLog) maybeCompact() {
+func (l *RaftLog) maybeCompact() { // 忘了这个了，所以导致出现了一些需要找到已经在DB中不存在的entries的问题
 	// Your Code Here (2C).
+	var fi, ft uint64
+	var err error
+	for {
+		fi, err = l.storage.FirstIndex()
+		if err != nil {
+			panic(err)
+		}
+		ft, err = l.storage.Term(fi - 1)
+		if err == ErrCompacted {
+			if i, _ := l.storage.FirstIndex(); i != fi {
+				// storage does compact after getting first index, so retry
+				continue
+			}
+		}
+		if err != nil {
+			panic(err)
+		}
+		break
+	}
+	compactSize := fi - l.offset
+	if compactSize > 0 && compactSize < uint64(len(l.entries)) {
+		l.entries = l.entries[compactSize:]
+		l.offset = fi
+		l.truncatedIndex = fi - 1
+		l.truncatedTerm = ft
+	}
 }
 
 // LastIndex return the last index of the log entries
@@ -307,7 +334,7 @@ func (l *RaftLog) hasCommittedEntries() bool { // for RawNode.HasReady
 	return l.applied < l.committed
 }
 
-func (l *RaftLog) stableSnapTo(index uint64) { // for Raft.Advance 在apply完snapshot后将pendingSnapshot清除
+func (l *RaftLog) stableSnapTo(index uint64) {                                 // for Raft.Advance 在apply完snapshot后将pendingSnapshot清除
 	if l.pendingSnapshot != nil && l.pendingSnapshot.Metadata.Index == index { // 避免又有个新的snapshot过来
 		l.pendingSnapshot = nil
 	}

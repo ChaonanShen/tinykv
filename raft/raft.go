@@ -296,6 +296,8 @@ func (r *Raft) sendAppend(to uint64) bool {
 			Snapshot: &snapshot,
 		}
 		r.send(m)
+
+		//r.RaftLog.maybeCompact() // TODO: leader有了snapshot后应该要尝试截断吧？
 	} else {
 		m := pb.Message{
 			MsgType: pb.MessageType_MsgAppend,

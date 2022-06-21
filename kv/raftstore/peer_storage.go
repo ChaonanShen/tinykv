@@ -86,7 +86,7 @@ func (ps *PeerStorage) InitialState() (eraftpb.HardState, eraftpb.ConfState, err
 	return *raftState.HardState, util.ConfStateFromRegion(ps.region), nil
 }
 
-// Entries 返回范围 [low, hi) 直接从kvDB中读取 -- 要保证[low, hi)范围必须是在kvDB中的确有entry存在（比如之后snapshot会删除一些截断的entries）
+// Entries 返回范围 [low, hi) 直接从kvDB中读取 -- 要保证[low, hi)范围必须是在raftDB中的确有entry存在（比如之后snapshot会删除一些截断的entries）
 func (ps *PeerStorage) Entries(low, high uint64) ([]eraftpb.Entry, error) {
 	if err := ps.checkRange(low, high); err != nil || low == high {
 		return nil, err
@@ -331,7 +331,7 @@ func (ps *PeerStorage) Append(entries []eraftpb.Entry, raftWB *engine_util.Write
 }
 
 // Apply the peer with given snapshot
-func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_util.WriteBatch, raftWB *engine_util.WriteBatch) (applyResult *ApplySnapResult, err error) {
+func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_util.WriteBatch, raftWB *engine_util.WriteBatch) (*ApplySnapResult, error) {
 	log.Infof("%v begin to apply snapshot", ps.Tag)
 	snapData := new(rspb.RaftSnapshotData)
 	if err := snapData.Unmarshal(snapshot.Data); err != nil { // snapshot.Metadata会传入，snapshot.Data这里才解析出来
@@ -352,8 +352,6 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 		RegionEpoch: ps.region.RegionEpoch,
 		Peers:       ps.region.Peers,
 	}
-	applyResult.Region = newRegion
-	applyResult.PrevRegion = prevRegion
 
 	if ps.isInitialized() {
 		if err := ps.clearMeta(kvWB, raftWB); err != nil {
@@ -391,7 +389,10 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 	}
 	<-notifier // 等待kv数据apply成功
 
-	return applyResult, nil
+	return &ApplySnapResult{
+		Region:     newRegion,
+		PrevRegion: prevRegion,
+	}, nil
 }
 
 // Save memory states to disk.
@@ -425,20 +426,17 @@ func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (applyResult *ApplySnap
 	if !raft.IsEmptyHardState(ready.HardState) { // update part of RaftLocalState
 		ps.raftState.HardState = &ready.HardState
 	}
-
-	err = raftWB.SetMeta(meta.RaftStateKey(ps.region.Id), ps.raftState) // GetRaftLocalState中读取这个状态
-	if err != nil {
+	// GetRaftLocalState中读取这个状态
+	if err = raftWB.SetMeta(meta.RaftStateKey(ps.region.Id), ps.raftState); err != nil {
 		return nil, err
 	}
 
-	err = kvWB.WriteToDB(ps.Engines.Kv)
-	if err != nil {
+	if err = kvWB.WriteToDB(ps.Engines.Kv); err != nil {
 		return nil, err
 	}
 	// TODO: 如果在这个位置程序崩溃，会不会导致raftDB和kvDB数据不一致？？？
 	// KvWB和raftWB写入先后顺序有没有关系？
-	err = raftWB.WriteToDB(ps.Engines.Raft)
-	if err != nil {
+	if err = raftWB.WriteToDB(ps.Engines.Raft); err != nil {
 		return nil, err
 	}
 

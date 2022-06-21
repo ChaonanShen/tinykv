@@ -10,7 +10,7 @@ mkdir $fdir
 for i in {1..100}
 do
 fname='p2c_'$i'.log'
-
+echo $fname
 echo $i >> $fname
 
 start_time=$(date +%s)

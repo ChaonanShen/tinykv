@@ -51,32 +51,37 @@ func (d *peerMsgHandler) HandleRaftReady() {
 	}
 	rd := d.RaftGroup.Ready()
 
-	if d.IsLeader() { // 根据raft博士论文10.2.1，如果是leader可以先发送msgs再持久化
-		d.Send(d.ctx.trans, rd.Messages)
-	}
+	//if d.IsLeader() { // 根据raft博士论文10.2.1，如果是leader可以先发送msgs再持久化
+	//	d.Send(d.ctx.trans, rd.Messages)
+	//}
 
 	// 调用ps.SaveReadyState持久化log entries和一些元数据
 	// 里面可能持久化unstabled entries / RaftLocalState(HardState(Term/Vote/Commit)/LastIndex/LastTerm) / RaftApplyState(AppliedIndex/Snapshot信息)&Snapshot的apply
-	applyResult, err := d.peerStorage.SaveReadyState(&rd) // 返回的ApplySnapResult目前不使用
+	applyResult, err := d.peerStorage.SaveReadyState(&rd)
 	if err != nil {
 		panic(err)
 	}
 
-	// 发送消息
-	if !d.IsLeader() {
-		d.Send(d.ctx.trans, rd.Messages)
-	}
+	//// 发送消息
+	//if !d.IsLeader() {
+	//	d.Send(d.ctx.trans, rd.Messages)
+	//}
+	d.Send(d.ctx.trans, rd.Messages)
 
 	if applyResult != nil {
 		// change storeMeta
-		d.ctx.storeMeta.Lock()
-		defer d.ctx.storeMeta.Unlock()
+		//d.ctx.storeMeta.Lock()
+		//defer d.ctx.storeMeta.Unlock()
 		d.ctx.storeMeta.regionRanges.ReplaceOrInsert(&regionItem{region: applyResult.Region})
 		d.ctx.storeMeta.regions[applyResult.Region.Id] = applyResult.Region
 	}
 
 	// apply committed entries -- 每一个entry apply到kvDB后都要同时原子修改applyState.AppliedIndex以保证apply safety（来自txy博客）
 	for _, entry := range rd.CommittedEntries {
+		if d.stopped { // TODO: 这里为什么要加？
+			return
+		}
+
 		kvWB := new(engine_util.WriteBatch)
 		d.peerStorage.applyState.AppliedIndex = entry.Index
 		err := kvWB.SetMeta(meta.ApplyStateKey(d.regionId), d.peerStorage.applyState)
@@ -90,6 +95,7 @@ func (d *peerMsgHandler) HandleRaftReady() {
 	d.RaftGroup.Advance(rd)
 }
 
+// 特别注意process里面要把kvWB写入kvDB中！
 func (d *peerMsgHandler) process(entry *eraftpb.Entry, kvWB *engine_util.WriteBatch) {
 	if entry.EntryType == eraftpb.EntryType_EntryNormal {
 		request := new(raft_cmdpb.RaftCmdRequest) // RaftCmdRequest是在RaftStorage.Write/Reader中生成的（可能来自其他peers），直到这里终于开始处理
@@ -103,7 +109,12 @@ func (d *peerMsgHandler) process(entry *eraftpb.Entry, kvWB *engine_util.WriteBa
 			d.processAdmin(entry, request.AdminRequest, kvWB)
 		}
 	} else { // eraftpb.EntryType_EntryConfChange
-
+		cc := &eraftpb.ConfChange{}
+		err := cc.Unmarshal(entry.Data)
+		if err != nil {
+			panic(err)
+		}
+		//d.processConfChange()
 	}
 }
 
@@ -177,7 +188,23 @@ func (d *peerMsgHandler) processNormal(entry *eraftpb.Entry, requests []*raft_cm
 }
 
 func (d *peerMsgHandler) processAdmin(entry *eraftpb.Entry, adminRequest *raft_cmdpb.AdminRequest, kvWB *engine_util.WriteBatch) {
+	switch adminRequest.CmdType {
+	case raft_cmdpb.AdminCmdType_CompactLog:
+		// 该截断了
+		if d.peerStorage.applyState.TruncatedState.Index >= adminRequest.CompactLog.CompactIndex {
+			return
+		}
+		d.peerStorage.applyState.TruncatedState.Index = adminRequest.CompactLog.CompactIndex
+		d.peerStorage.applyState.TruncatedState.Term = adminRequest.CompactLog.CompactTerm
+		kvWB.SetMeta(meta.ApplyStateKey(d.regionId), d.peerStorage.applyState)
+		// 真正删除不再使用的raftDB中的entries的工作交给raftlog-gc worker异步完成
+		d.ScheduleCompactLog(adminRequest.CompactLog.CompactIndex)
 
+		kvWB.WriteToDB(d.peerStorage.Engines.Kv) // 最初居然忘了这里进行持久化！！！
+	case raft_cmdpb.AdminCmdType_ChangePeer:
+	case raft_cmdpb.AdminCmdType_TransferLeader:
+	case raft_cmdpb.AdminCmdType_Split:
+	}
 }
 
 func (d *peerMsgHandler) HandleMsg(msg message.Msg) {
@@ -245,31 +272,41 @@ func (d *peerMsgHandler) preProposeRaftCommand(req *raft_cmdpb.RaftCmdRequest) e
 func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *message.Callback) {
 	err := d.preProposeRaftCommand(msg)
 	if err != nil {
-		cb.Done(ErrResp(err))
+		if cb != nil {
+			cb.Done(ErrResp(err))
+		}
 		return
 	}
 	// Your Code Here (2B).
 	index := d.RaftGroup.Raft.RaftLog.LastIndex() + 1
 	data, err := msg.Marshal() // 序列化msg 为什么要进行Marshal这步哪里的文档说的？好像也是直接看代码得来的？
 	if err != nil {
-		cb.Done(ErrResp(err))
+		if cb != nil {
+			cb.Done(ErrResp(err))
+		}
 		return
 	}
 	err = d.RaftGroup.Propose(data)
 	if err != nil {
-		cb.Done(ErrResp(err))
+		if cb != nil {
+			cb.Done(ErrResp(err))
+		}
 		return
 	}
 	if index == d.RaftGroup.Raft.RaftLog.LastIndex()+1 {
-		cb.Done(ErrResp(&util.ErrNotLeader{RegionId: d.regionId}))
+		if cb != nil {
+			cb.Done(ErrResp(&util.ErrNotLeader{RegionId: d.regionId}))
+		}
 		return
 	}
 	// propose成功，将callback记录入peer.proposal中
-	d.proposals = append(d.proposals, &proposal{
-		index: index,
-		term:  d.Term(),
-		cb:    cb,
-	})
+	if cb != nil { // callback == nil 干脆不用加入proposals了
+		d.proposals = append(d.proposals, &proposal{
+			index: index,
+			term:  d.Term(),
+			cb:    cb,
+		})
+	}
 }
 
 func (d *peerMsgHandler) onTick() {
