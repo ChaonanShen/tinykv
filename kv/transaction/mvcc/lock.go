@@ -37,8 +37,8 @@ func (lock *Lock) Info(key []byte) *kvrpcpb.LockInfo {
 func (lock *Lock) ToBytes() []byte {
 	buf := append(lock.Primary, byte(lock.Kind))
 	buf = append(buf, make([]byte, 16)...)
-	binary.BigEndian.PutUint64(buf[len(lock.Primary)+1:], lock.Ts)
-	binary.BigEndian.PutUint64(buf[len(lock.Primary)+9:], lock.Ttl)
+	binary.BigEndian.PutUint64(buf[len(lock.Primary)+1:], lock.Ts)  // +1是跳过Kind
+	binary.BigEndian.PutUint64(buf[len(lock.Primary)+9:], lock.Ttl) // +9是跳过Kind和Ts
 	return buf
 }
 

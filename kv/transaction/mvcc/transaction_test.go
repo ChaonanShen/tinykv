@@ -122,7 +122,7 @@ func TestDeleteValue4A(t *testing.T) {
 	assertDeleteInTxn(t, txn, EncodeKey([]byte{17, 255, 0}, 63454245), engine_util.CfDefault)
 }
 
-func singleEntry(m *storage.MemStorage) {
+func singleEntry(m *storage.MemStorage) { // 一条写入成功的记录 start_ts=40 commit_ts=42 key={16,240} val={1,2,3}
 	m.Set(engine_util.CfDefault, EncodeKey([]byte{16, 240}, 40), []byte{1, 2, 3})
 	write := Write{
 		StartTS: 40,
