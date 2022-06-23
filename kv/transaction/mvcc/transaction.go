@@ -261,6 +261,15 @@ func decodeTimestamp(key []byte) uint64 {
 	return ^binary.BigEndian.Uint64(left)
 }
 
+// decodeTimestamp takes a key + timestamp and returns the timestamp part.
+func DecodeTimestamp(key []byte) uint64 {
+	left, _, err := codec.DecodeBytes(key)
+	if err != nil {
+		panic(err)
+	}
+	return ^binary.BigEndian.Uint64(left)
+}
+
 // PhysicalTime returns the physical time part of the timestamp. -- timestamp中有一部分直接采用physical time
 func PhysicalTime(ts uint64) uint64 {
 	return ts >> tsoutil.PhysicalShiftBits

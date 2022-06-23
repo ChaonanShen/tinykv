@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"github.com/pingcap-incubator/tinykv/kv/transaction/mvcc"
@@ -265,10 +266,75 @@ func (server *Server) KvCommit(_ context.Context, req *kvrpcpb.CommitRequest) (*
 	return resp, nil
 }
 
+// 我的理解就是找到当前txn能够看到的所有key-value pairs
+// 逻辑还是得理清楚
 func (server *Server) KvScan(_ context.Context, req *kvrpcpb.ScanRequest) (*kvrpcpb.ScanResponse, error) {
 	// Your Code Here (4C).
 
-	return nil, nil
+	reader, err := server.storage.Reader(req.Context)
+	defer reader.Close()
+	if err != nil {
+		return nil, err
+	}
+
+	resp := &kvrpcpb.ScanResponse{}
+
+	// 还是得先从write列遍历，然后到CfDefault列中查找
+	iter := reader.IterCF(engine_util.CfWrite)
+	defer iter.Close()
+
+	iter.Seek(mvcc.EncodeKey(req.StartKey, req.Version))
+	var preKey []byte // 记录上一个已经加入resp.Pairs中的key
+	for iter.Valid() && len(resp.Pairs) < int(req.Limit) {
+		item := iter.Item()
+		key := item.Key() // EncodedKey{userKey, commitTs}
+		val, err := item.Value()
+		if err != nil {
+			return nil, err
+		}
+
+		userKey := mvcc.DecodeUserKey(key)
+		commitTs := mvcc.DecodeTimestamp(key)
+		write, err := mvcc.ParseWrite(val)
+
+		if commitTs > req.Version { // 不是这个事务能够看到的！
+			iter.Seek(mvcc.EncodeKey(userKey, req.Version)) // 定位到这个userKey当前事务能看到的版本
+			continue
+		}
+
+		// 下面确保这个write是当前事务能够看到的
+		if write.Kind == mvcc.WriteKindRollback { // 继续
+			iter.Next()
+			continue
+		} else if write.Kind == mvcc.WriteKindDelete { // 直接跳过这个userKey
+			// 记录当下的key，把iter调整到下一个位置
+			iter.Next()
+			for iter.Valid() {
+				newKey := mvcc.DecodeUserKey(iter.Item().Key())
+				if bytes.Compare(newKey, userKey) != 0 {
+					break
+				}
+				iter.Next()
+			}
+		} else { // put
+			if preKey == nil || bytes.Compare(userKey, preKey) != 0 { // 这个新的key又可以加入了
+				// 从CfDefault中找到 通过EncodeKey(userKey, write.StartTs)
+				userValue, err := reader.GetCF(engine_util.CfDefault, mvcc.EncodeKey(userKey, write.StartTS))
+				if err != nil {
+					return nil, err
+				}
+				resp.Pairs = append(resp.Pairs, &kvrpcpb.KvPair{Key: userKey, Value: userValue})
+				preKey = userKey
+				iter.Next()
+				continue
+			} else {
+				iter.Next()
+				continue
+			}
+		}
+	}
+
+	return resp, nil
 }
 
 // CheckTxnStatus返回约定:
@@ -276,9 +342,69 @@ func (server *Server) KvScan(_ context.Context, req *kvrpcpb.ScanRequest) (*kvrp
 // committed: commit_version > 0
 // rolled back: lock_ttl == 0 && commit_version == 0 ———— rollback有TTLExpireRollback/LockNotExistRollback，靠Action区分
 
+// 我人傻了，req.LockTs就代表了那个事务！！！
 func (server *Server) KvCheckTxnStatus(_ context.Context, req *kvrpcpb.CheckTxnStatusRequest) (*kvrpcpb.CheckTxnStatusResponse, error) {
 	// Your Code Here (4C).
-	return nil, nil
+
+	reader, err := server.storage.Reader(req.Context)
+	defer reader.Close()
+	if err != nil {
+		return nil, err
+	}
+
+	resp := &kvrpcpb.CheckTxnStatusResponse{}
+
+	txn := mvcc.NewMvccTxn(reader, req.LockTs)
+	// 看看pk有没有被锁住
+	lock, err := txn.GetLock(req.PrimaryKey)
+	if err != nil {
+		return nil, err
+	}
+	if lock != nil && lock.Ts == req.LockTs { // 有锁，根据是否过期
+		if mvcc.PhysicalTime(lock.Ts)+lock.Ttl >= mvcc.PhysicalTime(req.CurrentTs) { // 还未过期
+			resp.LockTtl = lock.Ttl
+			return resp, nil
+		} else { // 锁已经过期，看看是不是已经有了write记录
+			write, commitTs, err := txn.CurrentWrite(req.PrimaryKey)
+			if err != nil {
+				return nil, err
+			}
+			if write != nil { // 已经commit
+				resp.CommitVersion = commitTs
+			} else { // 如果这个事务的锁已经过期了，就直接rollback（删锁/value,放上write rollback记录）返回TTLExpireRollback（不需要上层再重新调用个什么来加上rollback的write记录）
+				txn.DeleteValue(req.PrimaryKey)
+				txn.DeleteLock(req.PrimaryKey)
+				txn.PutWrite(req.PrimaryKey, txn.StartTS, &mvcc.Write{StartTS: txn.StartTS, Kind: mvcc.WriteKindRollback})
+				resp.Action = kvrpcpb.Action_TTLExpireRollback
+			}
+			if err := server.storage.Write(req.Context, txn.Writes()); err != nil {
+				return nil, err
+			}
+			return resp, nil
+		}
+	}
+
+	// 那个事务已经没有锁了，看看有没有write记录
+	write, commitTs, err := txn.CurrentWrite(req.PrimaryKey)
+	if err != nil {
+		return nil, err
+	}
+	if write != nil {
+		if write.Kind != mvcc.WriteKindRollback {
+			resp.CommitVersion = commitTs
+			return resp, nil
+		} else { // rollback情形，什么都不用操作
+			return resp, nil
+		}
+	} else { // 没有锁，也没有write ———— 返回Action_LockNotExistRollback，并且加上一个rollback记录
+		resp.Action = kvrpcpb.Action_LockNotExistRollback
+		txn.PutWrite(req.PrimaryKey, req.LockTs, &mvcc.Write{StartTS: req.LockTs, Kind: mvcc.WriteKindRollback}) // ts怎么确定的？？？
+		if err := server.storage.Write(req.Context, txn.Writes()); err != nil {
+			return nil, err
+		}
+		return resp, nil
+	}
+	return resp, nil
 }
 
 func (server *Server) KvBatchRollback(_ context.Context, req *kvrpcpb.BatchRollbackRequest) (*kvrpcpb.BatchRollbackResponse, error) {

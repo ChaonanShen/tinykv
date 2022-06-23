@@ -220,7 +220,7 @@ func TestGetLocked4B(t *testing.T) {
 		{cf: engine_util.CfWrite, key: []byte{99}, ts: 54, value: []byte{1, 0, 0, 0, 0, 0, 0, 0, 50}},
 		{cf: engine_util.CfLock, key: []byte{99}, value: []byte{99, 1, 0, 0, 0, 0, 0, 0, 0, 200, 0, 0, 0, 0, 0, 0, 0, 0}},
 	})
-
+	// 应该是目前上锁的lock是ts=200的txn，下面ts=55的txn可以读到数据，但是ts=300的不能读到数据
 	var req0 kvrpcpb.GetRequest
 	req0.Key = []byte{99}
 	req0.Version = 55
@@ -246,7 +246,7 @@ func TestGetLocked4B(t *testing.T) {
 // TestEmptyPrewrite4B tests that a Prewrite with no mutations succeeds and changes nothing.
 func TestEmptyPrewrite4B(t *testing.T) {
 	builder := newBuilder(t)
-	cmd := builder.prewriteRequest()
+	cmd := builder.prewriteRequest() // 添加一个没有任何mutations的request
 	resp := builder.runOneRequest(cmd).(*kvrpcpb.PrewriteResponse)
 
 	assert.Empty(t, resp.Errors)
@@ -266,7 +266,7 @@ func TestSinglePrewrite4B(t *testing.T) {
 	builder.assertLens(1, 1, 0)
 	builder.assert([]kv{
 		{cf: engine_util.CfDefault, key: []byte{3}, value: []byte{42}},
-		{cf: engine_util.CfLock, key: []byte{3}, value: []byte{1, 1, 0, 0, 0, 0, 0, 0, 0, builder.ts(), 0, 0, 0, 0, 0, 0, 3, 232}},
+		{cf: engine_util.CfLock, key: []byte{3}, value: []byte{1, 1, 0, 0, 0, 0, 0, 0, 0, builder.ts(), 0, 0, 0, 0, 0, 0, 3, 232}}, // primary=1 kind=put
 	})
 }
 
@@ -279,7 +279,7 @@ func TestPrewriteLocked4B(t *testing.T) {
 
 	assert.Empty(t, resps[0].(*kvrpcpb.PrewriteResponse).Errors)
 	assert.Nil(t, resps[0].(*kvrpcpb.PrewriteResponse).RegionError)
-	assert.Equal(t, 1, len(resps[1].(*kvrpcpb.PrewriteResponse).Errors))
+	assert.Equal(t, 1, len(resps[1].(*kvrpcpb.PrewriteResponse).Errors)) // 有一个错误，因为key=3已经上锁了
 	assert.Nil(t, resps[1].(*kvrpcpb.PrewriteResponse).RegionError)
 	builder.assertLens(1, 1, 0)
 	builder.assert([]kv{
@@ -294,9 +294,9 @@ func TestPrewriteWritten4B(t *testing.T) {
 	cmd := builder.prewriteRequest(mutation(3, []byte{42}, kvrpcpb.Op_Put))
 	builder.init([]kv{
 		{cf: engine_util.CfDefault, key: []byte{3}, ts: 80, value: []byte{5}},
-		{cf: engine_util.CfWrite, key: []byte{3}, ts: 101, value: []byte{1, 0, 0, 0, 0, 0, 0, 0, 80}},
+		{cf: engine_util.CfWrite, key: []byte{3}, ts: 101, value: []byte{1, 0, 0, 0, 0, 0, 0, 0, 80}}, // commitTs=101 startTs=80 kind=put
 	})
-	resp := builder.runOneRequest(cmd).(*kvrpcpb.PrewriteResponse)
+	resp := builder.runOneRequest(cmd).(*kvrpcpb.PrewriteResponse) // 应该能读到有个更新的txn commit了key=3
 
 	assert.Equal(t, 1, len(resp.Errors))
 	assert.NotNil(t, resp.Errors[0].Conflict)
@@ -518,7 +518,7 @@ func TestRecommitKey4B(t *testing.T) {
 func TestCommitConflictRollback4B(t *testing.T) {
 	builder := newBuilder(t)
 	cmd := builder.commitRequest([]byte{3})
-	builder.init([]kv{
+	builder.init([]kv{ // WriteKind=rollback
 		{cf: engine_util.CfWrite, key: []byte{3}, ts: 110, value: []byte{3, 0, 0, 0, 0, 0, 0, 0, builder.ts()}},
 	})
 	resp := builder.runOneRequest(cmd).(*kvrpcpb.CommitResponse)
@@ -551,6 +551,7 @@ func TestCommitConflictRace4B(t *testing.T) {
 }
 
 // TestCommitConflictRepeat4B tests recommitting a transaction (i.e., the same commit request is received twice).
+// 发现当前事务已经commit成功过一次了，说明commit request重复发送了
 func TestCommitConflictRepeat4B(t *testing.T) {
 	builder := newBuilder(t)
 	cmd := builder.commitRequest([]byte{3})
@@ -564,7 +565,7 @@ func TestCommitConflictRepeat4B(t *testing.T) {
 	assert.Nil(t, resp.RegionError)
 	builder.assertLens(1, 0, 1)
 	builder.assert([]kv{
-		{cf: engine_util.CfWrite, key: []byte{3}, ts: 110},
+		{cf: engine_util.CfWrite, key: []byte{3}, ts: 110}, // 这里为什么CfWrite这个value会小时啊？？？————傻了，加上value也能过 是测试的问题
 		{cf: engine_util.CfDefault, key: []byte{3}},
 	})
 }
