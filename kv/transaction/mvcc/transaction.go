@@ -199,7 +199,9 @@ func (txn *MvccTxn) CurrentWrite(key []byte) (*Write, uint64, error) { // 应该
 
 // MostRecentWrite finds the most recent write with the given key. It returns a Write from the DB and that
 // write's commit timestamp, or an error.
-// 我感觉应该是找出来看看有没有write conflict的
+// 我感觉应该是找出来看看有没有write conflict的  在当前事务要提交的时候，看看有没有更新的事务已经提交
+// 我这里的语义其实是MostRecentCommitWrite，不管Rollback的
+// 但是有地方可能即使是rollback也需要，这点注意下
 func (txn *MvccTxn) MostRecentWrite(key []byte) (*Write, uint64, error) { // 应该是要最近写入的，不要rollback的这种 是需要当前txn之前的写入呢？还是不用管？（这牵涉到是从TsMax还是StartTs开始找起）
 	// Your Code Here (4A).
 	iter := txn.Reader.IterCF(engine_util.CfWrite)
