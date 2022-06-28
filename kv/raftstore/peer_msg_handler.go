@@ -51,9 +51,9 @@ func (d *peerMsgHandler) HandleRaftReady() {
 	}
 	rd := d.RaftGroup.Ready()
 
-	//if d.IsLeader() { // 根据raft博士论文10.2.1，如果是leader可以先发送msgs再持久化
-	//	d.Send(d.ctx.trans, rd.Messages)
-	//}
+	if d.IsLeader() { // 根据raft博士论文10.2.1，如果是leader可以先发送msgs再持久化
+		d.Send(d.ctx.trans, rd.Messages)
+	}
 
 	// 调用ps.SaveReadyState持久化log entries和一些元数据
 	// 里面可能持久化unstabled entries / RaftLocalState(HardState(Term/Vote/Commit)/LastIndex/LastTerm) / RaftApplyState(AppliedIndex/Snapshot信息)&Snapshot的apply
@@ -62,11 +62,12 @@ func (d *peerMsgHandler) HandleRaftReady() {
 		panic(err)
 	}
 
-	//// 发送消息
-	//if !d.IsLeader() {
-	//	d.Send(d.ctx.trans, rd.Messages)
-	//}
-	d.Send(d.ctx.trans, rd.Messages)
+	// 发送消息
+	if !d.IsLeader() {
+		d.Send(d.ctx.trans, rd.Messages)
+	}
+
+	//d.Send(d.ctx.trans, rd.Messages) -- 按理说消息重复发送应该也要能正确处理
 
 	if applyResult != nil {
 		// change storeMeta

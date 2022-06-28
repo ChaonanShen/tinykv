@@ -43,7 +43,7 @@ func (n *Node) Start(ctx context.Context, engines *engine_util.Engines, trans Tr
 	if err != nil {
 		return err
 	}
-	if storeID == util.InvalidID { // 分配一个全新的storeID，并且保存到enginie中
+	if storeID == util.InvalidID { // 分配一个全新的storeID，并且保存到engine中
 		storeID, err = n.bootstrapStore(ctx, engines)
 	}
 	if err != nil {
