@@ -393,6 +393,7 @@ func (r *Raft) becomeLeader() {
 	// NOTE: Leader should propose a noop entry on its term
 	r.reset(r.Term)
 	r.State = StateLeader
+	r.Lead = r.id // 细节还是要注意，之前这个leader的Lead没有设置一直没问题，但是3a测试中需要用这个Lead来进行测试，没加上就会出问题了！
 
 	// reset Progress
 	r.forEachProgress(func(id uint64, pr *Progress) { // 我觉得只需要在becomeLeader中清空就行，becomeCandidate和becomeFollower中不需要
@@ -449,7 +450,7 @@ func (r *Raft) reset(term uint64) {
 
 	r.resetRandomizedElectionTimeout()
 
-	//r.leadTransferee = None
+	r.leadTransferee = None
 
 	r.votes = make(map[uint64]bool) // 发起选举的投票记录清空
 	r.PendingConfIndex = 0
@@ -524,7 +525,8 @@ func (r *Raft) stepFollower(m pb.Message) error {
 		r.Lead = m.From
 		r.handleSnapshot(m)
 
-	case pb.MessageType_MsgTransferLeader:
+	case pb.MessageType_MsgTransferLeader: // ignore???
+
 	case pb.MessageType_MsgTimeoutNow:
 		r.campaign()
 	}
@@ -570,6 +572,11 @@ func (r *Raft) stepLeader(m pb.Message) error {
 	case pb.MessageType_MsgBeat: // local msg 让leader发出一轮广播，在tick中会Step这个消息
 		r.bcastHeartbeat()
 	case pb.MessageType_MsgPropose: // 追加新entry（怪了，这一次只能追加一个吗？）没追加一个entry立刻发送AppendEntries，是不是等多个
+		if r.leadTransferee != None {
+			log.Debugf(fmt.Sprintf("%d in TransferLeader, shouldn't accept new proposal", r.id))
+			return ErrProposalDropped
+		}
+
 		if len(m.Entries) == 0 {
 			log.Fatal(fmt.Sprintf("%d stepped empty MessageType_MsgPropose", r.id))
 		}
@@ -584,6 +591,10 @@ func (r *Raft) stepLeader(m pb.Message) error {
 				r.sendAppend(m.From) // resend append
 			}
 		} else {
+			if r.leadTransferee != None && m.From == r.leadTransferee { // 说明leadTransferee日志跟上了，可以立刻发出MsgTimeoutNow
+				log.Debugf(fmt.Sprintf("%d prepare TransferLeader to %d, log catched up, send MsgTimeoutNow immediately", r.id, r.leadTransferee))
+				r.send(pb.Message{MsgType: pb.MessageType_MsgTimeoutNow, To: m.From, From: r.id, Term: r.Term})
+			}
 			if pr.MaybeUpdate(m.Index) {
 				if r.maybeCommit() {
 					r.bcastAppend() // 让follower知道commit的推进
@@ -591,11 +602,27 @@ func (r *Raft) stepLeader(m pb.Message) error {
 			}
 		}
 
+	// 所以其实tinykv这里也是通过leader-follower心跳来检测是否需要再发Append消息
 	case pb.MessageType_MsgHeartbeatResponse: // 对这个回复不做任何处理，就只是检查下是否需要再发下AppendEntries，之后要做读写分离readindex时候，可能需要一次心跳来保证leader的合法性
 		if pr.Match < r.RaftLog.LastIndex() {
 			r.sendAppend(m.From)
 		}
-	case pb.MessageType_MsgTransferLeader:
+	case pb.MessageType_MsgTransferLeader: // msg.From->transferee
+		// 检查transferee是否log已经up-to-date
+		// 如果已经up-to-date就直接发送个MsgTimeoutNow
+		// 如果暂时未up-to-date，就帮助follower，发送Append msg，并停止接收新的proposal
+		if m.From == r.id {
+			log.Debugf(fmt.Sprintf("%d already is leader, no need to transfer", r.id))
+			return nil
+		}
+		r.leadTransferee = m.From             // 通过这个标记就可以停止接收新的proposals
+		if pr.Match < r.RaftLog.LastIndex() { // 发送之后就等着response了？要是response没到呢？
+			log.Debugf(fmt.Sprintf("%d prepare TransferLeader to %d, sendAppend to help it catch up", r.id, r.leadTransferee))
+			r.sendAppend(m.From)
+		} else { // 直接发送MsgTimeoutNow 让leadTransferee立刻发起选举
+			log.Debugf(fmt.Sprintf("%d prepare TransferLeader to %d, send MsgTimeoutNow immediately", r.id, r.leadTransferee))
+			r.send(pb.Message{MsgType: pb.MessageType_MsgTimeoutNow, To: m.From, From: r.id, Term: r.Term})
+		}
 	}
 	return nil
 }
