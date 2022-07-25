@@ -417,6 +417,7 @@ func (r *Raft) appendEntry(es ...pb.Entry) {
 		es[i].Index = lastIndex + uint64(i) + 1
 	}
 	lastIndex = r.RaftLog.append(es...) // 返回append后的lastIndex
+
 	// 每次append entry后都要修正下当前节点(leader)的Progress的match，以及如果是单节点的话commit也可以直接增长
 
 	pr := r.Prs[r.id]
@@ -425,7 +426,6 @@ func (r *Raft) appendEntry(es ...pb.Entry) {
 		r.becomeFollower(r.Term, None)
 		return
 	}
-
 	pr.MaybeUpdate(lastIndex)
 	r.maybeCommit() // 我觉得是在如果只有一个节点的情况下可能可以直接增长commit
 }
@@ -434,6 +434,9 @@ func (r *Raft) appendEntry(es ...pb.Entry) {
 // the commit index changed (in which case the caller should call
 // r.bcastAppend).
 func (r *Raft) maybeCommit() bool {
+	if len(r.Prs) == 0 {
+		return false
+	}
 	matchIndex := make(uint64Slice, len(r.Prs))
 	idx := 0
 	for _, p := range r.Prs {
@@ -714,11 +717,14 @@ func (r *Raft) restoreSnapshot(snap pb.Snapshot) bool { // 最好用值传递？
 // addNode add a new node to raft group
 func (r *Raft) addNode(id uint64) {
 	// Your Code Here (3A).
+	r.Prs[id] = &Progress{Match: uint64(0), Next: r.RaftLog.LastIndex() + 1}
 }
 
 // removeNode remove a node from raft group
 func (r *Raft) removeNode(id uint64) {
 	// Your Code Here (3A).
+	delete(r.Prs, id)
+	r.maybeCommit() // 删去一个节点，可能有些原先不能commit的日志现在可以commit了
 }
 
 func (r *Raft) resetRandomizedElectionTimeout() {

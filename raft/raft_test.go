@@ -1226,7 +1226,7 @@ func TestCommitAfterRemoveNode3A(t *testing.T) {
 	if len(ents) != 2 {
 		t.Fatalf("expected two committed entries, got %v", ents)
 	}
-	if ents[0].EntryType != pb.EntryType_EntryNormal || ents[0].Data != nil {
+	if ents[0].EntryType != pb.EntryType_EntryNormal || ents[0].Data != nil { // 这是那个当选leader后的noop entry
 		t.Fatalf("expected ents[0] to be empty, but got %v", ents[0])
 	}
 	if ents[1].EntryType != pb.EntryType_EntryConfChange {
