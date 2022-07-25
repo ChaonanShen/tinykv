@@ -1261,7 +1261,7 @@ func TestLeaderTransferToUpToDateNode3A(t *testing.T) {
 	checkLeaderTransferState(t, lead, StateFollower, 2)
 
 	// After some log replication, transfer leadership back to 1.
-	nt.send(pb.Message{From: 1, To: 1, MsgType: pb.MessageType_MsgPropose, Entries: []*pb.Entry{{}}})
+	nt.send(pb.Message{From: 1, To: 1, MsgType: pb.MessageType_MsgPropose, Entries: []*pb.Entry{{}}}) // 1又接收一些proposal
 
 	nt.send(pb.Message{From: 1, To: 2, MsgType: pb.MessageType_MsgTransferLeader})
 
@@ -1273,6 +1273,7 @@ func TestLeaderTransferToUpToDateNode3A(t *testing.T) {
 // Not like TestLeaderTransferToUpToDateNode, where the leader transfer message
 // is sent to the leader, in this test case every leader transfer message is sent
 // to the follower.
+// 意思是leader transfer msg交给follower的话也要能成功
 func TestLeaderTransferToUpToDateNodeFromFollower3A(t *testing.T) {
 	nt := newNetwork(nil, nil, nil)
 	nt.send(pb.Message{From: 1, To: 1, MsgType: pb.MessageType_MsgHup})
@@ -1283,12 +1284,12 @@ func TestLeaderTransferToUpToDateNodeFromFollower3A(t *testing.T) {
 		t.Fatalf("after election leader is %d, want 1", lead.Lead)
 	}
 
-	// Transfer leadership to 2.
+	// Transfer leadership to 2. -- 2现在是follower
 	nt.send(pb.Message{From: 2, To: 2, MsgType: pb.MessageType_MsgTransferLeader})
 
 	checkLeaderTransferState(t, lead, StateFollower, 2)
 
-	// After some log replication, transfer leadership back to 1.
+	// After some log replication, transfer leadership back to 1. -- 1现在是follower
 	nt.send(pb.Message{From: 1, To: 1, MsgType: pb.MessageType_MsgPropose, Entries: []*pb.Entry{{}}})
 
 	nt.send(pb.Message{From: 1, To: 1, MsgType: pb.MessageType_MsgTransferLeader})
@@ -1381,7 +1382,7 @@ func TestLeaderTransferRemoveNode3A(t *testing.T) {
 	nt.send(pb.Message{From: 1, To: 1, MsgType: pb.MessageType_MsgHup})
 
 	lead := nt.peers[1].(*Raft)
-	lead.removeNode(3)
+	lead.removeNode(3) // 这个removeNode要自己实现的！所以还通不过
 
 	nt.send(pb.Message{From: 3, To: 1, MsgType: pb.MessageType_MsgTransferLeader})
 
@@ -1433,7 +1434,7 @@ func checkLeaderTransferState(t *testing.T, r *Raft, state StateType, lead uint6
 // (previously, if the node also got votes, it would panic as it
 // transitioned to StateLeader)
 func TestTransferNonMember3A(t *testing.T) {
-	r := newTestRaft(1, []uint64{2, 3, 4}, 5, 1, NewMemoryStorage())
+	r := newTestRaft(1, []uint64{2, 3, 4}, 5, 1, NewMemoryStorage()) // 1这个节点根本就不在{2 3 4}这个cluster中，在哪一层过滤掉这个消息？
 	r.Step(pb.Message{From: 2, To: 1, MsgType: pb.MessageType_MsgTimeoutNow, Term: r.Term})
 
 	r.Step(pb.Message{From: 2, To: 1, MsgType: pb.MessageType_MsgRequestVoteResponse, Term: r.Term})

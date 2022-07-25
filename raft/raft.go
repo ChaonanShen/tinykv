@@ -418,7 +418,15 @@ func (r *Raft) appendEntry(es ...pb.Entry) {
 	}
 	lastIndex = r.RaftLog.append(es...) // 返回append后的lastIndex
 	// 每次append entry后都要修正下当前节点(leader)的Progress的match，以及如果是单节点的话commit也可以直接增长
-	r.Prs[r.id].MaybeUpdate(lastIndex)
+
+	pr := r.Prs[r.id]
+	if pr == nil { // 在TestTransferNonMember3A发现这个问题，出现不属于当前cluster的节点时，这里Prs会为nil（我觉得应该在其他某处处理这种node不属于集群的问题比较好，目前暂时先这样）
+		log.Debugf(fmt.Sprintf("node %d not exist", r.id))
+		r.becomeFollower(r.Term, None)
+		return
+	}
+
+	pr.MaybeUpdate(lastIndex)
 	r.maybeCommit() // 我觉得是在如果只有一个节点的情况下可能可以直接增长commit
 }
 
@@ -525,8 +533,8 @@ func (r *Raft) stepFollower(m pb.Message) error {
 		r.Lead = m.From
 		r.handleSnapshot(m)
 
-	case pb.MessageType_MsgTransferLeader: // ignore???
-
+	case pb.MessageType_MsgTransferLeader: // 来自TestLeaderTransferToUpToDateNodeFromFollower3A, follower收到leader transfer直接发起选举就行
+		r.campaign()
 	case pb.MessageType_MsgTimeoutNow:
 		r.campaign()
 	}
