@@ -420,12 +420,7 @@ func (r *Raft) appendEntry(es ...pb.Entry) {
 
 	// 每次append entry后都要修正下当前节点(leader)的Progress的match，以及如果是单节点的话commit也可以直接增长
 
-	pr := r.Prs[r.id]
-	if pr == nil { // 在TestTransferNonMember3A发现这个问题，出现不属于当前cluster的节点时，这里Prs会为nil（我觉得应该在其他某处处理这种node不属于集群的问题比较好，目前暂时先这样）
-		log.Debugf(fmt.Sprintf("node %d not exist", r.id))
-		r.becomeFollower(r.Term, None)
-		return
-	}
+	pr := r.Prs[r.id] // 把对pr==nil的判断提前到了Step入口处，直接ErrStepPeerNotFound
 	pr.MaybeUpdate(lastIndex)
 	r.maybeCommit() // 我觉得是在如果只有一个节点的情况下可能可以直接增长commit
 }
@@ -471,6 +466,13 @@ func (r *Raft) reset(term uint64) {
 // on `eraftpb.proto` for what msgs should be handled
 func (r *Raft) Step(m pb.Message) error {
 	// Your Code Here (2A).
+
+	// 本节点已经不再集群中了！
+	if r.Prs[r.id] == nil { // 在TestTransferNonMember3A发现这个问题，出现不属于当前cluster的节点时，这里Prs会为nil（我觉得应该在其他某处处理这种node不属于集群的问题比较好，目前暂时先这样）
+		log.Debugf(fmt.Sprintf("node %d not exist", r.id))
+		r.becomeFollower(r.Term, None)
+		return ErrStepPeerNotFound
+	}
 
 	// deal with m.Term
 	switch {
@@ -582,7 +584,7 @@ func (r *Raft) stepLeader(m pb.Message) error {
 	switch m.MsgType {
 	case pb.MessageType_MsgBeat: // local msg 让leader发出一轮广播，在tick中会Step这个消息
 		r.bcastHeartbeat()
-	case pb.MessageType_MsgPropose: // 追加新entry（怪了，这一次只能追加一个吗？）没追加一个entry立刻发送AppendEntries，是不是等多个
+	case pb.MessageType_MsgPropose: // 追加新entries
 		if r.leadTransferee != None {
 			log.Debugf(fmt.Sprintf("%d in TransferLeader, shouldn't accept new proposal", r.id))
 			return ErrProposalDropped
