@@ -217,7 +217,9 @@ func newRaft(c *Config) *Raft {
 		votes:            make(map[uint64]bool),
 		electionTimeout:  c.ElectionTick,
 		heartbeatTimeout: c.HeartbeatTick,
-		// heartbeatElapsed和electionElapsed初始化为0
+		heartbeatElapsed: 0,
+		electionElapsed:  0,
+		PendingConfIndex: 0,
 	}
 
 	// 初始化Progress {Next/Match}
@@ -395,6 +397,8 @@ func (r *Raft) becomeLeader() {
 	r.State = StateLeader
 	r.Lead = r.id // 细节还是要注意，之前这个leader的Lead没有设置一直没问题，但是3a测试中需要用这个Lead来进行测试，没加上就会出问题了！
 
+	r.PendingConfIndex = r.RaftLog.LastIndex() // txy文档关于confchange2：新当选leader需要保证之前任期的所有log都apply后才能进行新的confchagne（涉及单步配置变更的safety）
+
 	// reset Progress
 	r.forEachProgress(func(id uint64, pr *Progress) { // 我觉得只需要在becomeLeader中清空就行，becomeCandidate和becomeFollower中不需要
 		*pr = Progress{Next: r.RaftLog.LastIndex() + 1}
@@ -458,8 +462,9 @@ func (r *Raft) reset(term uint64) {
 
 	r.leadTransferee = None
 
-	r.votes = make(map[uint64]bool) // 发起选举的投票记录清空
 	r.PendingConfIndex = 0
+
+	r.votes = make(map[uint64]bool) // 发起选举的投票记录清空
 }
 
 // Step the entrance of handle message, see `MessageType`
@@ -593,6 +598,23 @@ func (r *Raft) stepLeader(m pb.Message) error {
 		if len(m.Entries) == 0 {
 			log.Fatal(fmt.Sprintf("%d stepped empty MessageType_MsgPropose", r.id))
 		}
+
+		// txy文档关于confchange1：只有当前共识组的最新ConfChange日志apply后才可以接收新的ConfChange
+		for i, e := range m.Entries {
+			if e.EntryType == pb.EntryType_EntryConfChange {
+				var cc pb.ConfChange
+				if err := cc.Unmarshal(e.Data); err != nil {
+					return err
+				}
+				if r.PendingConfIndex > r.RaftLog.applied {
+					log.Debugf(fmt.Sprintf("%d ignore new cc due to previous cc not applied", r.id))
+					m.Entries[i] = &pb.Entry{EntryType: pb.EntryType_EntryNormal} // 偷梁换柱直接替换成Normal entry! -- 这样在apply的过程里注意看看要不要改下，这种空entry在apply过程中不知会不会出问题
+				} else {
+					r.PendingConfIndex = r.RaftLog.LastIndex() + uint64(i) + 1
+				}
+			}
+		}
+
 		// []*Entry -> []Entry
 		es := transformFromPointers(m.Entries)
 		r.appendEntry(es...)
