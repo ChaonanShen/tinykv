@@ -119,6 +119,31 @@ func (d *peerMsgHandler) process(entry *eraftpb.Entry, kvWB *engine_util.WriteBa
 	}
 }
 
+func (d *peerMsgHandler) processAdmin(entry *eraftpb.Entry, adminRequest *raft_cmdpb.AdminRequest, kvWB *engine_util.WriteBatch) {
+	switch adminRequest.CmdType {
+	case raft_cmdpb.AdminCmdType_CompactLog: // 做了哪些改动，持久化相关信息
+		// 该截断了
+		if d.peerStorage.applyState.TruncatedState.Index >= adminRequest.CompactLog.CompactIndex {
+			return
+		}
+		d.peerStorage.applyState.TruncatedState.Index = adminRequest.CompactLog.CompactIndex
+		d.peerStorage.applyState.TruncatedState.Term = adminRequest.CompactLog.CompactTerm
+		kvWB.SetMeta(meta.ApplyStateKey(d.regionId), d.peerStorage.applyState)
+		// 真正删除不再使用的raftDB中的entries的工作交给raftlog-gc worker异步完成 -- 很好奇到底怎样异步完成的
+		d.ScheduleCompactLog(adminRequest.CompactLog.CompactIndex)
+
+		// TODO: use callback to respond
+
+		kvWB.WriteToDB(d.peerStorage.Engines.Kv) // 最初居然忘了这里进行持久化！！！
+	case raft_cmdpb.AdminCmdType_ChangePeer:
+
+	case raft_cmdpb.AdminCmdType_TransferLeader:
+		panic("transfer leader shouldn't be dealt now, should already be dealt in propose cmd stage") // 其他request都是要propose-commit达成共识，然后在apply阶段处理，但是transfer leader不需要达成共识，直接propose前就应该处理，所以这个时候不应该出现这个类型命令
+
+	case raft_cmdpb.AdminCmdType_Split:
+	}
+}
+
 func (d *peerMsgHandler) processNormal(entry *eraftpb.Entry, requests []*raft_cmdpb.Request, kvWB *engine_util.WriteBatch) {
 	// 只有put/delete需要在WriteBatch中处理
 	for _, request := range requests {
@@ -186,26 +211,6 @@ func (d *peerMsgHandler) processNormal(entry *eraftpb.Entry, requests []*raft_cm
 		}
 	}
 	kvWB.WriteToDB(d.ctx.engine.Kv)
-}
-
-func (d *peerMsgHandler) processAdmin(entry *eraftpb.Entry, adminRequest *raft_cmdpb.AdminRequest, kvWB *engine_util.WriteBatch) {
-	switch adminRequest.CmdType {
-	case raft_cmdpb.AdminCmdType_CompactLog:
-		// 该截断了
-		if d.peerStorage.applyState.TruncatedState.Index >= adminRequest.CompactLog.CompactIndex {
-			return
-		}
-		d.peerStorage.applyState.TruncatedState.Index = adminRequest.CompactLog.CompactIndex
-		d.peerStorage.applyState.TruncatedState.Term = adminRequest.CompactLog.CompactTerm
-		kvWB.SetMeta(meta.ApplyStateKey(d.regionId), d.peerStorage.applyState)
-		// 真正删除不再使用的raftDB中的entries的工作交给raftlog-gc worker异步完成
-		d.ScheduleCompactLog(adminRequest.CompactLog.CompactIndex)
-
-		kvWB.WriteToDB(d.peerStorage.Engines.Kv) // 最初居然忘了这里进行持久化！！！
-	case raft_cmdpb.AdminCmdType_ChangePeer:
-	case raft_cmdpb.AdminCmdType_TransferLeader:
-	case raft_cmdpb.AdminCmdType_Split:
-	}
 }
 
 func (d *peerMsgHandler) HandleMsg(msg message.Msg) {
@@ -278,9 +283,23 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 		}
 		return
 	}
+
+	// 如果是Transfer Leader命令，不需要propose，直接处理
+	if msg.AdminRequest != nil && msg.AdminRequest.CmdType == raft_cmdpb.AdminCmdType_TransferLeader {
+		d.RaftGroup.TransferLeader(msg.AdminRequest.GetTransferLeader().Peer.GetId())
+		cb.Done(&raft_cmdpb.RaftCmdResponse{
+			Header: &raft_cmdpb.RaftResponseHeader{CurrentTerm: d.Term()},
+			AdminResponse: &raft_cmdpb.AdminResponse{
+				CmdType:        raft_cmdpb.AdminCmdType_TransferLeader,
+				TransferLeader: &raft_cmdpb.TransferLeaderResponse{},
+			},
+		})
+		return
+	}
+
 	// Your Code Here (2B).
 	index := d.RaftGroup.Raft.RaftLog.LastIndex() + 1
-	data, err := msg.Marshal() // 序列化msg 为什么要进行Marshal这步哪里的文档说的？好像也是直接看代码得来的？
+	data, err := msg.Marshal() // 序列化msg
 	if err != nil {
 		if cb != nil {
 			cb.Done(ErrResp(err))
