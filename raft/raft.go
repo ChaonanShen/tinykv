@@ -338,9 +338,18 @@ func (r *Raft) sendHeartbeat(to uint64) {
 	})
 }
 
+func (r *Raft) isMember() bool { // true if is a member, false if not
+	return r.Prs[r.id] != nil
+}
+
+// txy文档关于confchange:只tick仍在共识组之中的raftnode(看是否在r.Prs这个map中,raft node中只有这个map表示有哪些节点在集群中)
 // tick advances the internal logical clock by a single tick.
 func (r *Raft) tick() {
 	// Your Code Here (2A).
+	if !r.isMember() {
+		return
+	}
+
 	switch r.State {
 	case StateFollower, StateCandidate:
 		r.electionElapsed++
