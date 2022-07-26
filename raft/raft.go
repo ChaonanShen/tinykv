@@ -750,14 +750,28 @@ func (r *Raft) restoreSnapshot(snap pb.Snapshot) bool { // 最好用值传递？
 // addNode add a new node to raft group
 func (r *Raft) addNode(id uint64) {
 	// Your Code Here (3A).
+	if !r.isMember() {
+		return
+	}
+
 	r.Prs[id] = &Progress{Match: uint64(0), Next: r.RaftLog.LastIndex() + 1}
+	r.votes[id] = false
 }
 
 // removeNode remove a node from raft group
 func (r *Raft) removeNode(id uint64) {
 	// Your Code Here (3A).
+	if !r.isMember() {
+		return
+	}
+
 	delete(r.Prs, id)
-	r.maybeCommit() // 删去一个节点，可能有些原先不能commit的日志现在可以commit了
+	delete(r.votes, id)
+
+	// 删去一个节点，可能有些原先不能commit的日志现在可以commit了
+	if r.maybeCommit() {
+		r.bcastAppend() // 需要立刻将commit增长的消息传播出去
+	}
 }
 
 func (r *Raft) resetRandomizedElectionTimeout() {
