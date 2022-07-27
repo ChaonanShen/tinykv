@@ -55,6 +55,7 @@ var _log *Logger = New()
 func init() {
 	SetFlags(Ltime | Lmicroseconds | Lshortfile)
 	SetHighlighting(runtime.GOOS != "windows")
+	SetLevel(LOG_LEVEL_INFO)
 }
 
 func GlobalLogger() *log.Logger {

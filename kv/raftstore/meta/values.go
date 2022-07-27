@@ -3,6 +3,7 @@ package meta
 import (
 	"github.com/Connor1996/badger"
 	"github.com/pingcap-incubator/tinykv/kv/util/engine_util"
+	"github.com/pingcap-incubator/tinykv/log"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/metapb"
 	rspb "github.com/pingcap-incubator/tinykv/proto/pkg/raft_serverpb"
@@ -55,6 +56,8 @@ func InitRaftLocalState(raftEngine *badger.DB, region *metapb.Region) (*rspb.Raf
 	if err == badger.ErrKeyNotFound { // 如果没有找到对应RaftLocalState
 		raftState = new(rspb.RaftLocalState)
 		raftState.HardState = new(eraftpb.HardState)
+
+		log.Debugf("In InitRaftLocalState ErrKeyNotFound len(region.Peers)=%v regionId=%v", len(region.Peers), region.Id)
 		if len(region.Peers) > 0 { // 这个region.Peers又是那里生成
 			// new split region
 			raftState.LastIndex = RaftInitLogIndex
@@ -68,6 +71,8 @@ func InitRaftLocalState(raftEngine *badger.DB, region *metapb.Region) (*rspb.Raf
 		}
 		// 如果len(region.Peers) == 0 --> 全部index/term/commit都直接初始化为0
 		// 其实就是区分了split region后初始化peer 和 add peer后初始化peer两种场景，后者信息初始化为0就是希望让leader快速发来snapshot（因为leader那边1-4的日志必定已经截断）
+	} else {
+		log.Debugf("In InitRaftLocalState KeyFound regionId=%v", region.Id)
 	}
 	return raftState, nil
 }
@@ -80,6 +85,8 @@ func InitApplyState(kvEngine *badger.DB, region *metapb.Region) (*rspb.RaftApply
 	if err == badger.ErrKeyNotFound {
 		applyState = new(rspb.RaftApplyState)
 		applyState.TruncatedState = new(rspb.RaftTruncatedState)
+
+		log.Debugf("In InitApplyState ErrKeyNotFound len(region.Peers)=%v regionId=%v", len(region.Peers), region.Id)
 		if len(region.Peers) > 0 {
 			applyState.AppliedIndex = RaftInitLogIndex
 			applyState.TruncatedState.Index = RaftInitLogIndex
@@ -91,6 +98,8 @@ func InitApplyState(kvEngine *badger.DB, region *metapb.Region) (*rspb.RaftApply
 		if err != nil {
 			return applyState, err
 		}
+	} else {
+		log.Debugf("In InitApplyState KeyFound regionId=%v", region.Id)
 	}
 	return applyState, nil
 }

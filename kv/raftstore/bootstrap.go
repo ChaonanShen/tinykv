@@ -2,10 +2,10 @@ package raftstore
 
 import (
 	"bytes"
-
 	"github.com/Connor1996/badger"
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/meta"
 	"github.com/pingcap-incubator/tinykv/kv/util/engine_util"
+	"github.com/pingcap-incubator/tinykv/log"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/metapb"
 	rspb "github.com/pingcap-incubator/tinykv/proto/pkg/raft_serverpb"
@@ -114,6 +114,8 @@ func writeInitialApplyState(kvWB *engine_util.WriteBatch, regionID uint64) {
 		},
 	}
 	kvWB.SetMeta(meta.ApplyStateKey(regionID), applyState)
+	log.Debugf("writeInitialApplyState regionId %v applyState appliedIndex %v truncatedIndex %v truncatedTerm %v",
+		regionID, applyState.AppliedIndex, applyState.TruncatedState.Index, applyState.TruncatedState.Term)
 }
 
 func writeInitialRaftState(raftWB *engine_util.WriteBatch, regionID uint64) {
@@ -125,6 +127,8 @@ func writeInitialRaftState(raftWB *engine_util.WriteBatch, regionID uint64) {
 		LastIndex: meta.RaftInitLogIndex,
 	}
 	raftWB.SetMeta(meta.RaftStateKey(regionID), raftState)
+	log.Debugf("writeInitialRaftState regionId %v raftstate term %v commit %v lastindex %v",
+		regionID, raftState.HardState.Term, raftState.HardState.Commit, raftState.LastIndex)
 }
 
 func ClearPrepareBootstrap(engines *engine_util.Engines, regionID uint64) error {

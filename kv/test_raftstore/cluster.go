@@ -33,7 +33,7 @@ type Simulator interface {
 type Cluster struct {
 	schedulerClient *MockSchedulerClient
 	count           int
-	engines         map[uint64]*engine_util.Engines
+	engines         map[uint64]*engine_util.Engines // storeID->engine
 	snapPaths       map[uint64]string
 	dirs            []string
 	simulator       Simulator

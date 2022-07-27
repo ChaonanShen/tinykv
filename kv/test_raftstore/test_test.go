@@ -542,18 +542,28 @@ func TestBasicConfChange3B(t *testing.T) {
 	defer cluster.Shutdown()
 
 	cluster.MustTransferLeader(1, NewPeer(1, 1))
+	log.Infof("------MustRemovePeer region1 Peer{storeID 2 peerID 2}")
 	cluster.MustRemovePeer(1, NewPeer(2, 2))
+	log.Infof("------MustRemovePeer region1 Peer{storeID 3 peerID 3}")
 	cluster.MustRemovePeer(1, NewPeer(3, 3))
+	log.Infof("------MustRemovePeer region1 Peer{storeID 4 peerID 4}")
 	cluster.MustRemovePeer(1, NewPeer(4, 4))
+	log.Infof("------MustRemovePeer region1 Peer{storeID 5 peerID 5}")
 	cluster.MustRemovePeer(1, NewPeer(5, 5))
 
 	// now region 1 only has peer: (1, 1)
+	log.Infof("------now region1 only has peer{1, 1}, 任何共识都能直接达成")
+	log.Infof("------MustPut(k1, v1) must fail")
 	cluster.MustPut([]byte("k1"), []byte("v1"))
+	log.Infof("------MustGetNone(k1) 从engines[storeID=2]中不可能读出数据")
 	MustGetNone(cluster.engines[2], []byte("k1"))
 
 	// add peer (2, 2) to region 1
+	log.Infof("------MustAddPeer region1 Peer{storeID 2 peerID 2}")
 	cluster.MustAddPeer(1, NewPeer(2, 2))
+	log.Infof("------MustPut(k2, v2)")
 	cluster.MustPut([]byte("k2"), []byte("v2"))
+	log.Infof("------MustGet(k2, v2)")
 	cluster.MustGet([]byte("k2"), []byte("v2"))
 	MustGetEqual(cluster.engines[2], []byte("k1"), []byte("v1"))
 	MustGetEqual(cluster.engines[2], []byte("k2"), []byte("v2"))
@@ -565,7 +575,9 @@ func TestBasicConfChange3B(t *testing.T) {
 	MustGetNone(cluster.engines[5], []byte("k1"))
 
 	// add peer (3, 3) to region 1
+	log.Infof("------MustAddPeer region1 Peer{storeID 3 peerID 3}")
 	cluster.MustAddPeer(1, NewPeer(3, 3))
+	log.Infof("------MustRemovePeer region1 Peer{storeID 2 peerID 2}")
 	cluster.MustRemovePeer(1, NewPeer(2, 2))
 
 	cluster.MustPut([]byte("k3"), []byte("v3"))
