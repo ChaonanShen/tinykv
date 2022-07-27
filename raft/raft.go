@@ -403,6 +403,12 @@ func (r *Raft) becomeLeader() {
 	// Your Code Here (2A).
 	// NOTE: Leader should propose a noop entry on its term
 	r.reset(r.Term)
+
+	// 注意：之前本来把这个检测直接放到Step入口处，或者StepLeader，会导致3b中新建peer出现问题，就放在这个位置，3a和3b都没有问题
+	if r.Prs[r.id] == nil { // TestTransferNonMember3A发现的情况，该节点可能已经不属于集群了，检测这种情况
+		r.becomeFollower(r.Term, None)
+		return
+	}
 	r.State = StateLeader
 	r.Lead = r.id // 细节还是要注意，之前这个leader的Lead没有设置一直没问题，但是3a测试中需要用这个Lead来进行测试，没加上就会出问题了！
 
@@ -441,7 +447,7 @@ func (r *Raft) appendEntry(es ...pb.Entry) {
 // maybeCommit attempts to advance the commit index. Returns true if
 // the commit index changed (in which case the caller should call
 // r.bcastAppend).
-func (r *Raft) maybeCommit() bool {
+func (r *Raft) maybeCommit() bool { // 这个只有leader可以调用
 	if len(r.Prs) == 0 {
 		return false
 	}
@@ -480,13 +486,6 @@ func (r *Raft) reset(term uint64) {
 // on `eraftpb.proto` for what msgs should be handled
 func (r *Raft) Step(m pb.Message) error {
 	// Your Code Here (2A).
-
-	// 本节点已经不再集群中了！
-	if r.Prs[r.id] == nil { // 在TestTransferNonMember3A发现这个问题，出现不属于当前cluster的节点时，这里Prs会为nil（我觉得应该在其他某处处理这种node不属于集群的问题比较好，目前暂时先这样）
-		log.Debugf(fmt.Sprintf("node %d not exist", r.id))
-		r.becomeFollower(r.Term, None)
-		return ErrStepPeerNotFound
-	}
 
 	// deal with m.Term
 	switch {
@@ -756,6 +755,10 @@ func (r *Raft) addNode(id uint64) {
 
 	r.Prs[id] = &Progress{Match: uint64(0), Next: r.RaftLog.LastIndex() + 1}
 	r.votes[id] = false
+
+	if r.State == StateLeader { // 立刻给新加入节点发出snapshot
+		r.sendAppend(id)
+	}
 }
 
 // removeNode remove a node from raft group
@@ -769,8 +772,14 @@ func (r *Raft) removeNode(id uint64) {
 	delete(r.votes, id)
 
 	// 删去一个节点，可能有些原先不能commit的日志现在可以commit了
-	if r.maybeCommit() {
-		r.bcastAppend() // 需要立刻将commit增长的消息传播出去
+	if r.State == StateLeader {
+		if r.maybeCommit() {
+			r.bcastAppend() // 需要立刻将commit增长的消息传播出去
+		}
+
+		if r.leadTransferee != None && r.Prs[r.leadTransferee] == nil { // 删除的是节点是leadertransferee，那就只能停止
+			r.leadTransferee = None
+		}
 	}
 }
 

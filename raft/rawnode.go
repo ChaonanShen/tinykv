@@ -137,7 +137,7 @@ func (rn *RawNode) ApplyConfChange(cc pb.ConfChange) *pb.ConfState {
 // 因此Campaign()和Propose()函数中要直接调用rn.Raft.Step
 func (rn *RawNode) Step(m pb.Message) error {
 	// ignore unexpected local messages receiving over network
-	if IsLocalMsg(m.MsgType) {
+	if IsLocalMsg(m.MsgType) { // IsLocalMsg过滤MsgHup和MsgBeat两种消息
 		return ErrStepLocalMsg
 	}
 	if pr := rn.Raft.Prs[m.From]; pr != nil || !IsResponseMsg(m.MsgType) {
@@ -239,5 +239,5 @@ func (rn *RawNode) GetProgress() map[uint64]Progress {
 // TransferLeader tries to transfer leadership to the given transferee.
 func (rn *RawNode) TransferLeader(transferee uint64) {
 	_ = rn.Raft.Step(pb.Message{MsgType: pb.MessageType_MsgTransferLeader, From: transferee})
-	// 这里把From成员设置成transferee是为了通过这种方式将transferee传递给raft层吗
+	// 这里把From成员设置成transferee是为了通过这种方式将transferee传递给raft层吗 - 是的
 }

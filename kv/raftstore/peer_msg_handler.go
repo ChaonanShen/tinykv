@@ -89,7 +89,7 @@ func (d *peerMsgHandler) HandleRaftReady() {
 		if err != nil {
 			panic(err)
 		}
-		d.process(&entry, kvWB) // process中进行WriteToDB
+		d.applyEntry(&entry, kvWB) // process中进行WriteToDB
 	}
 
 	// call RaftGroup(RawNode).Advance推进raft状态机状态
@@ -97,7 +97,7 @@ func (d *peerMsgHandler) HandleRaftReady() {
 }
 
 // 特别注意process里面要把kvWB写入kvDB中！
-func (d *peerMsgHandler) process(entry *eraftpb.Entry, kvWB *engine_util.WriteBatch) {
+func (d *peerMsgHandler) applyEntry(entry *eraftpb.Entry, kvWB *engine_util.WriteBatch) {
 	if entry.EntryType == eraftpb.EntryType_EntryNormal {
 		request := new(raft_cmdpb.RaftCmdRequest) // RaftCmdRequest是在RaftStorage.Write/Reader中生成的（可能来自其他peers），直到这里终于开始处理
 		err := request.Unmarshal(entry.Data)
@@ -105,9 +105,9 @@ func (d *peerMsgHandler) process(entry *eraftpb.Entry, kvWB *engine_util.WriteBa
 			panic(err)
 		}
 		if request.AdminRequest == nil {
-			d.processNormal(entry, request.Requests, kvWB)
+			d.applyNormalRequest(entry, request.Requests, kvWB)
 		} else {
-			d.processAdmin(entry, request.AdminRequest, kvWB)
+			d.applyAdminRequest(entry, request.AdminRequest, kvWB)
 		}
 	} else { // eraftpb.EntryType_EntryConfChange
 		cc := &eraftpb.ConfChange{}
@@ -115,11 +115,91 @@ func (d *peerMsgHandler) process(entry *eraftpb.Entry, kvWB *engine_util.WriteBa
 		if err != nil {
 			panic(err)
 		}
-		//d.processConfChange()
+		d.applyConfChange(entry, cc, kvWB)
 	}
 }
 
-func (d *peerMsgHandler) processAdmin(entry *eraftpb.Entry, adminRequest *raft_cmdpb.AdminRequest, kvWB *engine_util.WriteBatch) {
+func (d *peerMsgHandler) applyConfChange(entry *eraftpb.Entry, cc *eraftpb.ConfChange, kvWB *engine_util.WriteBatch) {
+	// 1.修改并保存新的RegionLocalState 里面的Region.RegionEpoch和Region.Peers要修改 -- 读出现有的RegionLocalState然后修正然后再保存？
+	// 2.对于add node, 之后peer会通过storeWorker的maybeCreatePeer创建(leader会发送snapshot过来) -- 意思是不用手动调用什么？
+	//   对于remove node, 如果当前peer就是被删除的peer，需要调用destroyPeer()来明确删除Peer(如果当前peer不是被删除的peer，那只需要修改下region和raft内一些peer相关的状态就行)
+	// 3.update the region state in storeMeta of GlobalContext
+	// 4.对peer.PeerCache的修改
+	// 5.调用RawNode.ApplyConfChange - 会进行add/remove node，然后返回最新的peers
+	// 6.保证即使执行duplicate commands of the same confchange也能正常
+
+	region := d.Region() // 从peerstorage中读出来
+	region.RegionEpoch.ConfVer++
+
+	if cc.ChangeType == eraftpb.ConfChangeType_RemoveNode {
+		// 修改region.Peers，删去其中删去的PeerID
+		var newpeers []*metapb.Peer
+		for _, p := range region.Peers {
+			if p.GetId() != cc.NodeId { // 除了要删去的peerID，其他都保留
+				newpeers = append(newpeers, p)
+			}
+		}
+		region.Peers = newpeers
+
+		d.peer.removePeerCache(cc.NodeId)
+
+		d.ctx.storeMeta.regions[d.regionId] = region
+		d.SetRegion(region)
+
+		if cc.NodeId == d.PeerId() { // 如果当前peer就是要删去的peer，还要手动调用destroyPeer
+			//meta.WriteRegionState(kvWB, region, rspb.PeerState_Tombstone) // peer.Destroy中会调用
+			d.RaftGroup.ApplyConfChange(*cc)
+			d.destroyPeer() // 这里面会把RaftLocalState/RaftApplyState都删除
+		} else {
+			meta.WriteRegionState(kvWB, region, rspb.PeerState_Normal)
+			kvWB.MustWriteToDB(d.ctx.engine.Kv) // 话说每个peer都要把RegionLocalState重新写一遍 - 这没问题，region在不同store上元数据都要写一遍
+			d.RaftGroup.ApplyConfChange(*cc)
+		}
+	} else {
+		// 修改region.Peers，加上新增的PeerID
+		newpeer := new(metapb.Peer)
+		err := newpeer.Unmarshal(cc.Context)
+		if err != nil {
+			panic(err)
+		}
+		region.Peers = append(region.Peers, newpeer)
+
+		d.peer.insertPeerCache(newpeer)
+
+		d.ctx.storeMeta.regions[d.regionId] = region
+		d.SetRegion(region)
+
+		meta.WriteRegionState(kvWB, region, rspb.PeerState_Normal)
+		kvWB.MustWriteToDB(d.ctx.engine.Kv) // 话说每个peer都要把RegionLocalState重新写一遍
+		d.RaftGroup.ApplyConfChange(*cc)
+	}
+
+	//resp callback
+	for len(d.proposals) > 0 && d.proposals[0].index < entry.Index { // remove stale proposals
+		// stale cmd
+		p := d.proposals[0]
+		d.proposals = d.proposals[1:]
+		NotifyStaleReq(p.index, p.cb)
+	}
+
+	if len(d.proposals) > 0 && d.proposals[0].index == entry.Index { // 找到对应proposal
+		p := d.proposals[0]
+		d.proposals = d.proposals[1:]
+		if entry.Term == p.term {
+			p.cb.Done(&raft_cmdpb.RaftCmdResponse{
+				Header: &raft_cmdpb.RaftResponseHeader{CurrentTerm: d.Term()},
+				AdminResponse: &raft_cmdpb.AdminResponse{
+					CmdType:    raft_cmdpb.AdminCmdType_ChangePeer,
+					ChangePeer: &raft_cmdpb.ChangePeerResponse{Region: d.Region()},
+				},
+			})
+		} else {
+			NotifyStaleReq(p.term, p.cb)
+		}
+	}
+}
+
+func (d *peerMsgHandler) applyAdminRequest(entry *eraftpb.Entry, adminRequest *raft_cmdpb.AdminRequest, kvWB *engine_util.WriteBatch) {
 	switch adminRequest.CmdType {
 	case raft_cmdpb.AdminCmdType_CompactLog: // 做了哪些改动，持久化相关信息
 		// 该截断了
@@ -136,15 +216,15 @@ func (d *peerMsgHandler) processAdmin(entry *eraftpb.Entry, adminRequest *raft_c
 
 		kvWB.WriteToDB(d.peerStorage.Engines.Kv) // 最初居然忘了这里进行持久化！！！
 	case raft_cmdpb.AdminCmdType_ChangePeer:
-
+		panic("change peer should be dealt in applyConfChange")
 	case raft_cmdpb.AdminCmdType_TransferLeader:
-		panic("transfer leader shouldn't be dealt now, should already be dealt in propose cmd stage") // 其他request都是要propose-commit达成共识，然后在apply阶段处理，但是transfer leader不需要达成共识，直接propose前就应该处理，所以这个时候不应该出现这个类型命令
+		panic("transfer leader shouldn't be dealt here, should already be dealt in propose cmd stage") // 其他request都是要propose-commit达成共识，然后在apply阶段处理，但是transfer leader不需要达成共识，直接propose前就应该处理，所以这个时候不应该出现这个类型命令
 
 	case raft_cmdpb.AdminCmdType_Split:
 	}
 }
 
-func (d *peerMsgHandler) processNormal(entry *eraftpb.Entry, requests []*raft_cmdpb.Request, kvWB *engine_util.WriteBatch) {
+func (d *peerMsgHandler) applyNormalRequest(entry *eraftpb.Entry, requests []*raft_cmdpb.Request, kvWB *engine_util.WriteBatch) {
 	// 只有put/delete需要在WriteBatch中处理
 	for _, request := range requests {
 		switch request.CmdType {
@@ -299,20 +379,38 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 
 	// Your Code Here (2B).
 	index := d.RaftGroup.Raft.RaftLog.LastIndex() + 1
-	data, err := msg.Marshal() // 序列化msg
+
+	// 如果是confchange，要使用rawnode.ProposeConfChange，其他就用Propose
+	if msg.AdminRequest != nil && msg.AdminRequest.CmdType == raft_cmdpb.AdminCmdType_ChangePeer {
+		cp := msg.AdminRequest.GetChangePeer()
+		ctx, err := cp.Peer.Marshal()
+		if err != nil {
+			panic(err)
+		}
+		cc := eraftpb.ConfChange{
+			ChangeType: cp.ChangeType,
+			NodeId:     cp.GetPeer().GetId(),
+			Context:    ctx, // 在add peer中，需要用这个参数来传递Peer参数（为啥不直接传个peer参数呢？）
+		}
+		err = d.RaftGroup.ProposeConfChange(cc)
+	} else {
+		data, err := msg.Marshal() // 序列化msg
+		if err != nil {
+			if cb != nil {
+				cb.Done(ErrResp(err))
+			}
+			return
+		}
+		err = d.RaftGroup.Propose(data)
+	}
+
 	if err != nil {
 		if cb != nil {
 			cb.Done(ErrResp(err))
 		}
 		return
 	}
-	err = d.RaftGroup.Propose(data)
-	if err != nil {
-		if cb != nil {
-			cb.Done(ErrResp(err))
-		}
-		return
-	}
+
 	if index == d.RaftGroup.Raft.RaftLog.LastIndex()+1 {
 		if cb != nil {
 			cb.Done(ErrResp(&util.ErrNotLeader{RegionId: d.regionId}))
@@ -393,6 +491,7 @@ func (d *peerMsgHandler) onRaftMsg(msg *rspb.RaftMessage) error {
 	}
 	key, err := d.checkSnapshot(msg)
 	if err != nil {
+		log.Infof("In onRaftMsg checkSnapshot error %v", err)
 		return err
 	}
 	if key != nil {
@@ -410,6 +509,7 @@ func (d *peerMsgHandler) onRaftMsg(msg *rspb.RaftMessage) error {
 	d.insertPeerCache(msg.GetFromPeer())
 	err = d.RaftGroup.Step(*msg.GetMessage())
 	if err != nil {
+		log.Infof("In onRaftMsg  RaftGroup.Step error %v", err)
 		return err
 	}
 	if d.AnyNewPeerCatchUp(msg.FromPeer.Id) {
