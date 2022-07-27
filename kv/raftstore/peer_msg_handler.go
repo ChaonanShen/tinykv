@@ -142,19 +142,6 @@ func (d *peerMsgHandler) applyConfChange(entry *eraftpb.Entry, cc *eraftpb.ConfC
 		region.Peers = newpeers
 
 		d.peer.removePeerCache(cc.NodeId)
-
-		d.ctx.storeMeta.regions[d.regionId] = region
-		d.SetRegion(region)
-
-		if cc.NodeId == d.PeerId() { // 如果当前peer就是要删去的peer，还要手动调用destroyPeer
-			//meta.WriteRegionState(kvWB, region, rspb.PeerState_Tombstone) // peer.Destroy中会调用
-			d.RaftGroup.ApplyConfChange(*cc)
-			d.destroyPeer() // 这里面会把RaftLocalState/RaftApplyState都删除
-		} else {
-			meta.WriteRegionState(kvWB, region, rspb.PeerState_Normal)
-			kvWB.MustWriteToDB(d.ctx.engine.Kv) // 话说每个peer都要把RegionLocalState重新写一遍 - 这没问题，region在不同store上元数据都要写一遍
-			d.RaftGroup.ApplyConfChange(*cc)
-		}
 	} else {
 		// 修改region.Peers，加上新增的PeerID
 		newpeer := new(metapb.Peer)
@@ -165,15 +152,23 @@ func (d *peerMsgHandler) applyConfChange(entry *eraftpb.Entry, cc *eraftpb.ConfC
 		region.Peers = append(region.Peers, newpeer)
 
 		d.peer.insertPeerCache(newpeer)
-
-		d.ctx.storeMeta.regions[d.regionId] = region
-		d.SetRegion(region)
-
-		meta.WriteRegionState(kvWB, region, rspb.PeerState_Normal)
-		kvWB.MustWriteToDB(d.ctx.engine.Kv) // 话说每个peer都要把RegionLocalState重新写一遍
-		d.RaftGroup.ApplyConfChange(*cc)
 	}
 
+	d.ctx.storeMeta.regions[d.regionId] = region
+	d.SetRegion(region)
+
+	if cc.ChangeType == eraftpb.ConfChangeType_RemoveNode && cc.NodeId == d.PeerId() { // 如果当前peer就是要删去的peer，还要手动调用destroyPeer
+		//meta.WriteRegionState(kvWB, region, rspb.PeerState_Tombstone) // peer.Destroy中会调用
+		d.RaftGroup.ApplyConfChange(*cc)
+		d.destroyPeer() // 这里面会把RaftLocalState/RaftApplyState都删除
+		goto respCallback
+	}
+
+	meta.WriteRegionState(kvWB, region, rspb.PeerState_Normal)
+	kvWB.MustWriteToDB(d.ctx.engine.Kv) // 话说每个peer都要把RegionLocalState重新写一遍
+	d.RaftGroup.ApplyConfChange(*cc)
+
+respCallback:
 	//resp callback
 	for len(d.proposals) > 0 && d.proposals[0].index < entry.Index { // remove stale proposals
 		// stale cmd
@@ -202,25 +197,53 @@ func (d *peerMsgHandler) applyConfChange(entry *eraftpb.Entry, cc *eraftpb.ConfC
 func (d *peerMsgHandler) applyAdminRequest(entry *eraftpb.Entry, adminRequest *raft_cmdpb.AdminRequest, kvWB *engine_util.WriteBatch) {
 	switch adminRequest.CmdType {
 	case raft_cmdpb.AdminCmdType_CompactLog: // 做了哪些改动，持久化相关信息
-		// 该截断了
-		if d.peerStorage.applyState.TruncatedState.Index >= adminRequest.CompactLog.CompactIndex {
-			return
-		}
-		d.peerStorage.applyState.TruncatedState.Index = adminRequest.CompactLog.CompactIndex
-		d.peerStorage.applyState.TruncatedState.Term = adminRequest.CompactLog.CompactTerm
-		kvWB.SetMeta(meta.ApplyStateKey(d.regionId), d.peerStorage.applyState)
-		// 真正删除不再使用的raftDB中的entries的工作交给raftlog-gc worker异步完成 -- 很好奇到底怎样异步完成的
-		d.ScheduleCompactLog(adminRequest.CompactLog.CompactIndex)
-
-		// TODO: use callback to respond
-
-		kvWB.WriteToDB(d.peerStorage.Engines.Kv) // 最初居然忘了这里进行持久化！！！
+		d.applyCompactLogRequest(entry, adminRequest.CompactLog, kvWB)
 	case raft_cmdpb.AdminCmdType_ChangePeer:
 		panic("change peer should be dealt in applyConfChange")
 	case raft_cmdpb.AdminCmdType_TransferLeader:
-		panic("transfer leader shouldn't be dealt here, should already be dealt in propose cmd stage") // 其他request都是要propose-commit达成共识，然后在apply阶段处理，但是transfer leader不需要达成共识，直接propose前就应该处理，所以这个时候不应该出现这个类型命令
-
+		panic("transfer leader shouldn't be dealt here, should already be dealt in propose cmd stage")
+		// 其他request都是要propose-commit达成共识，然后在apply阶段处理，但是transfer leader不需要达成共识，直接propose前就应该处理，所以这个时候不应该出现这个类型命令
 	case raft_cmdpb.AdminCmdType_Split:
+
+	}
+}
+
+func (d *peerMsgHandler) applyCompactLogRequest(entry *eraftpb.Entry, req *raft_cmdpb.CompactLogRequest, kvWB *engine_util.WriteBatch) {
+	// 该截断了
+	if d.peerStorage.applyState.TruncatedState.Index >= req.CompactIndex {
+		return
+	}
+	d.peerStorage.applyState.TruncatedState.Index = req.CompactIndex
+	d.peerStorage.applyState.TruncatedState.Term = req.CompactTerm
+	kvWB.SetMeta(meta.ApplyStateKey(d.regionId), d.peerStorage.applyState)
+	// 真正删除不再使用的raftDB中的entries的工作交给raftlog-gc worker异步完成 -- 很好奇到底怎样异步完成的
+	d.ScheduleCompactLog(req.CompactIndex)
+
+	kvWB.WriteToDB(d.peerStorage.Engines.Kv) // 最初居然忘了这里进行持久化！！！
+
+	// TODO: use callback to respond
+	//resp callback
+	for len(d.proposals) > 0 && d.proposals[0].index < entry.Index { // remove stale proposals
+		// stale cmd
+		p := d.proposals[0]
+		d.proposals = d.proposals[1:]
+		NotifyStaleReq(p.index, p.cb)
+	}
+
+	if len(d.proposals) > 0 && d.proposals[0].index == entry.Index { // 找到对应proposal
+		p := d.proposals[0]
+		d.proposals = d.proposals[1:]
+		if entry.Term == p.term {
+			p.cb.Done(&raft_cmdpb.RaftCmdResponse{
+				Header: &raft_cmdpb.RaftResponseHeader{CurrentTerm: d.Term()},
+				AdminResponse: &raft_cmdpb.AdminResponse{
+					CmdType:    raft_cmdpb.AdminCmdType_CompactLog,
+					CompactLog: &raft_cmdpb.CompactLogResponse{},
+				},
+			})
+		} else {
+			NotifyStaleReq(p.term, p.cb)
+		}
 	}
 }
 
