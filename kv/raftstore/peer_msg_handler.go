@@ -105,9 +105,9 @@ func (d *peerMsgHandler) applyEntry(entry *eraftpb.Entry, kvWB *engine_util.Writ
 			panic(err)
 		}
 		if request.AdminRequest == nil {
-			d.applyNormalRequest(entry, request.Requests, kvWB)
+			d.applyNormalRequest(entry, request.Requests, kvWB) // Normal request
 		} else {
-			d.applyAdminRequest(entry, request.AdminRequest, kvWB)
+			d.applyAdminRequest(entry, request.AdminRequest, kvWB) // CompactLog & Split (TransferLeader不用propose就直接执行了）
 		}
 	} else { // eraftpb.EntryType_EntryConfChange
 		cc := &eraftpb.ConfChange{}
@@ -115,7 +115,7 @@ func (d *peerMsgHandler) applyEntry(entry *eraftpb.Entry, kvWB *engine_util.Writ
 		if err != nil {
 			panic(err)
 		}
-		d.applyConfChange(entry, cc, kvWB)
+		d.applyConfChange(entry, cc, kvWB) // ChangePeer
 	}
 }
 
@@ -128,69 +128,57 @@ func (d *peerMsgHandler) applyConfChange(entry *eraftpb.Entry, cc *eraftpb.ConfC
 	// 5.调用RawNode.ApplyConfChange - 会进行add/remove node，然后返回最新的peers
 	// 6.保证即使执行duplicate commands of the same confchange也能正常
 
-	region := d.Region() // 从peerstorage中读出来
-	region.RegionEpoch.ConfVer++
+	// 假设regionA在各个store上分布：store1-peer1 store2-peer2 store3-peer3
+	// 要删除store1上peer1，就要在store1上调用destroyPeer()，而store2 store3上只要相应修改下元数据，知道store1上peer1已经不在raftgroup中了即可
 
-	if cc.ChangeType == eraftpb.ConfChangeType_RemoveNode {
-		// 修改region.Peers，删去其中删去的PeerID
-		var newpeers []*metapb.Peer
-		for _, p := range region.Peers {
-			if p.GetId() != cc.NodeId { // 除了要删去的peerID，其他都保留
-				newpeers = append(newpeers, p)
-			}
-		}
-		region.Peers = newpeers
-
-		d.peer.removePeerCache(cc.NodeId)
-	} else {
-		// 修改region.Peers，加上新增的PeerID
-		newpeer := new(metapb.Peer)
-		err := newpeer.Unmarshal(cc.Context)
-		if err != nil {
-			panic(err)
-		}
-		region.Peers = append(region.Peers, newpeer)
-
-		d.peer.insertPeerCache(newpeer)
-	}
-
-	d.ctx.storeMeta.regions[d.regionId] = region
-	d.SetRegion(region)
-
-	if cc.ChangeType == eraftpb.ConfChangeType_RemoveNode && cc.NodeId == d.PeerId() { // 如果当前peer就是要删去的peer，还要手动调用destroyPeer
-		//meta.WriteRegionState(kvWB, region, rspb.PeerState_Tombstone) // peer.Destroy中会调用
-		d.RaftGroup.ApplyConfChange(*cc)
+	// 我觉得这句可以放到最前面，这种情况直接不用处理了
+	if cc.ChangeType == eraftpb.ConfChangeType_RemoveNode && cc.NodeId == d.PeerId() { // 如果当前peer就是要删去的peer，调用destroyPeer将该peer从这个store中删去
 		d.destroyPeer() // 这里面会把RaftLocalState/RaftApplyState都删除
-		goto respCallback
-	}
+	} else {
+		region := d.Region() // 从peerstorage中读出来
+		region.RegionEpoch.ConfVer++
 
-	meta.WriteRegionState(kvWB, region, rspb.PeerState_Normal)
-	kvWB.MustWriteToDB(d.ctx.engine.Kv) // 话说每个peer都要把RegionLocalState重新写一遍
-	d.RaftGroup.ApplyConfChange(*cc)
+		if cc.ChangeType == eraftpb.ConfChangeType_RemoveNode {
+			// 修改region.Peers，删去其中删去的PeerID
+			var newpeers []*metapb.Peer
+			for _, p := range region.Peers {
+				if p.GetId() != cc.NodeId { // 除了要删去的peerID，其他都保留
+					newpeers = append(newpeers, p)
+				}
+			}
+			region.Peers = newpeers
 
-respCallback:
-	//resp callback
-	for len(d.proposals) > 0 && d.proposals[0].index < entry.Index { // remove stale proposals
-		// stale cmd
-		p := d.proposals[0]
-		d.proposals = d.proposals[1:]
-		NotifyStaleReq(p.index, p.cb)
-	}
-
-	if len(d.proposals) > 0 && d.proposals[0].index == entry.Index { // 找到对应proposal
-		p := d.proposals[0]
-		d.proposals = d.proposals[1:]
-		if entry.Term == p.term {
-			p.cb.Done(&raft_cmdpb.RaftCmdResponse{
-				Header: &raft_cmdpb.RaftResponseHeader{CurrentTerm: d.Term()},
-				AdminResponse: &raft_cmdpb.AdminResponse{
-					CmdType:    raft_cmdpb.AdminCmdType_ChangePeer,
-					ChangePeer: &raft_cmdpb.ChangePeerResponse{Region: d.Region()},
-				},
-			})
+			d.peer.removePeerCache(cc.NodeId)
 		} else {
-			NotifyStaleReq(p.term, p.cb)
+			// 修改region.Peers，加上新增的PeerID
+			newpeer := new(metapb.Peer)
+			err := newpeer.Unmarshal(cc.Context)
+			if err != nil {
+				panic(err)
+			}
+			region.Peers = append(region.Peers, newpeer)
+
+			d.peer.insertPeerCache(newpeer)
 		}
+
+		d.ctx.storeMeta.regions[d.regionId] = region
+		d.SetRegion(region)
+
+		meta.WriteRegionState(kvWB, region, rspb.PeerState_Normal)
+		kvWB.MustWriteToDB(d.ctx.engine.Kv) // 话说每个peer都要把RegionLocalState重新写一遍
+		d.RaftGroup.ApplyConfChange(*cc)
+	}
+
+	p := d.getProposal(entry)
+	if p != nil {
+		resp := &raft_cmdpb.RaftCmdResponse{
+			Header: &raft_cmdpb.RaftResponseHeader{CurrentTerm: d.Term()},
+			AdminResponse: &raft_cmdpb.AdminResponse{
+				CmdType:    raft_cmdpb.AdminCmdType_ChangePeer,
+				ChangePeer: &raft_cmdpb.ChangePeerResponse{Region: d.Region()},
+			},
+		}
+		p.cb.Done(resp)
 	}
 }
 
@@ -204,8 +192,12 @@ func (d *peerMsgHandler) applyAdminRequest(entry *eraftpb.Entry, adminRequest *r
 		panic("transfer leader shouldn't be dealt here, should already be dealt in propose cmd stage")
 		// 其他request都是要propose-commit达成共识，然后在apply阶段处理，但是transfer leader不需要达成共识，直接propose前就应该处理，所以这个时候不应该出现这个类型命令
 	case raft_cmdpb.AdminCmdType_Split:
-
+		d.applySplitRequest(entry, adminRequest.Split, kvWB)
 	}
+}
+
+func (d *peerMsgHandler) applySplitRequest(entry *eraftpb.Entry, req *raft_cmdpb.SplitRequest, kvWB *engine_util.WriteBatch) {
+
 }
 
 func (d *peerMsgHandler) applyCompactLogRequest(entry *eraftpb.Entry, req *raft_cmdpb.CompactLogRequest, kvWB *engine_util.WriteBatch) {
@@ -216,34 +208,21 @@ func (d *peerMsgHandler) applyCompactLogRequest(entry *eraftpb.Entry, req *raft_
 	d.peerStorage.applyState.TruncatedState.Index = req.CompactIndex
 	d.peerStorage.applyState.TruncatedState.Term = req.CompactTerm
 	kvWB.SetMeta(meta.ApplyStateKey(d.regionId), d.peerStorage.applyState)
-	// 真正删除不再使用的raftDB中的entries的工作交给raftlog-gc worker异步完成 -- 很好奇到底怎样异步完成的
+	// 真正删除不再使用的raftDB中的entries的工作交给raftlog-gc worker异步完成 -- 很好奇到底怎样异步完成的，有时间仔细看看
 	d.ScheduleCompactLog(req.CompactIndex)
 
 	kvWB.WriteToDB(d.peerStorage.Engines.Kv) // 最初居然忘了这里进行持久化！！！
 
-	// TODO: use callback to respond
-	//resp callback
-	for len(d.proposals) > 0 && d.proposals[0].index < entry.Index { // remove stale proposals
-		// stale cmd
-		p := d.proposals[0]
-		d.proposals = d.proposals[1:]
-		NotifyStaleReq(p.index, p.cb)
-	}
-
-	if len(d.proposals) > 0 && d.proposals[0].index == entry.Index { // 找到对应proposal
-		p := d.proposals[0]
-		d.proposals = d.proposals[1:]
-		if entry.Term == p.term {
-			p.cb.Done(&raft_cmdpb.RaftCmdResponse{
-				Header: &raft_cmdpb.RaftResponseHeader{CurrentTerm: d.Term()},
-				AdminResponse: &raft_cmdpb.AdminResponse{
-					CmdType:    raft_cmdpb.AdminCmdType_CompactLog,
-					CompactLog: &raft_cmdpb.CompactLogResponse{},
-				},
-			})
-		} else {
-			NotifyStaleReq(p.term, p.cb)
+	p := d.getProposal(entry)
+	if p != nil {
+		resp := &raft_cmdpb.RaftCmdResponse{
+			Header: &raft_cmdpb.RaftResponseHeader{CurrentTerm: d.Term()},
+			AdminResponse: &raft_cmdpb.AdminResponse{
+				CmdType:    raft_cmdpb.AdminCmdType_CompactLog,
+				CompactLog: &raft_cmdpb.CompactLogResponse{},
+			},
 		}
+		p.cb.Done(resp)
 	}
 }
 
@@ -260,7 +239,49 @@ func (d *peerMsgHandler) applyNormalRequest(entry *eraftpb.Entry, requests []*ra
 
 	// 如果是follower节点进行apply，那就会直接跳过对proposals的处理（因为根本没有对应的proposal，只有leader节点有对应的proposal等待callback）
 
-	// 对[]*raft_cmdpb.Request中每个请求作出回复，最后通过保存在proposals中的callback.Done返回给客户端
+	p := d.getProposal(entry)
+	if p != nil {
+		raftCmdResponse := &raft_cmdpb.RaftCmdResponse{
+			Header: &raft_cmdpb.RaftResponseHeader{CurrentTerm: d.Term()}, // Write/Reader的checkResponse中会检查resp.Heder.Error != nil，所以我想这个Header必须要不是ni
+		}
+		var responses []*raft_cmdpb.Response
+		for _, request := range requests { // 实际上requests中要么都是读，要么都是写 不会有读写混合
+			switch request.CmdType {
+			case raft_cmdpb.CmdType_Put:
+				responses = append(responses, &raft_cmdpb.Response{
+					CmdType: raft_cmdpb.CmdType_Put,
+					Put:     &raft_cmdpb.PutResponse{},
+				})
+			case raft_cmdpb.CmdType_Delete:
+				responses = append(responses, &raft_cmdpb.Response{
+					CmdType: raft_cmdpb.CmdType_Delete,
+					Delete:  &raft_cmdpb.DeleteResponse{},
+				})
+			case raft_cmdpb.CmdType_Get:
+				val, _ := engine_util.GetCF(d.ctx.engine.Kv, request.Get.Cf, request.Get.Key)
+				responses = append(responses, &raft_cmdpb.Response{
+					CmdType: raft_cmdpb.CmdType_Get,
+					Get:     &raft_cmdpb.GetResponse{Value: val},
+				})
+			case raft_cmdpb.CmdType_Snap: // 返回一个txn
+				responses = append(responses, &raft_cmdpb.Response{
+					CmdType: raft_cmdpb.CmdType_Snap,
+					Snap:    &raft_cmdpb.SnapResponse{Region: d.Region()},
+				})
+				p.cb.Txn = d.ctx.engine.Kv.NewTransaction(false)
+			default:
+				log.Fatal("unknown CmdType")
+			}
+		}
+		raftCmdResponse.Responses = responses
+
+		p.cb.Done(raftCmdResponse)
+	}
+
+	kvWB.WriteToDB(d.ctx.engine.Kv)
+}
+
+func (d *peerMsgHandler) getProposal(entry *eraftpb.Entry) *proposal { // 没有proposal就返回nil
 	for len(d.proposals) > 0 && d.proposals[0].index < entry.Index { // remove stale proposals
 		// stale cmd
 		p := d.proposals[0]
@@ -268,52 +289,16 @@ func (d *peerMsgHandler) applyNormalRequest(entry *eraftpb.Entry, requests []*ra
 		NotifyStaleReq(p.index, p.cb)
 	}
 
-	if len(d.proposals) > 0 && d.proposals[0].index == entry.Index { // 找到了entry对应的proposal
+	if len(d.proposals) > 0 && d.proposals[0].index == entry.Index { // 找到对应proposal
 		p := d.proposals[0]
 		d.proposals = d.proposals[1:]
-		if entry.Term == p.term { //
-			raftCmdResponse := &raft_cmdpb.RaftCmdResponse{
-				Header: &raft_cmdpb.RaftResponseHeader{CurrentTerm: d.Term()}, // Write/Reader的checkResponse中会检查resp.Heder.Error != nil，所以我想这个Header必须要不是ni
-			}
-			var responses []*raft_cmdpb.Response
-			for _, request := range requests { // 实际上requests中要么都是读，要么都是写 不会有读写混合
-				switch request.CmdType {
-				case raft_cmdpb.CmdType_Put:
-					responses = append(responses, &raft_cmdpb.Response{
-						CmdType: raft_cmdpb.CmdType_Put,
-						Put:     &raft_cmdpb.PutResponse{},
-					})
-				case raft_cmdpb.CmdType_Delete:
-					responses = append(responses, &raft_cmdpb.Response{
-						CmdType: raft_cmdpb.CmdType_Delete,
-						Delete:  &raft_cmdpb.DeleteResponse{},
-					})
-				case raft_cmdpb.CmdType_Get:
-					val, _ := engine_util.GetCF(d.ctx.engine.Kv, request.Get.Cf, request.Get.Key)
-					responses = append(responses, &raft_cmdpb.Response{
-						CmdType: raft_cmdpb.CmdType_Get,
-						Get:     &raft_cmdpb.GetResponse{Value: val},
-					})
-				case raft_cmdpb.CmdType_Snap: // 返回一个txn
-					responses = append(responses, &raft_cmdpb.Response{
-						CmdType: raft_cmdpb.CmdType_Snap,
-						Snap:    &raft_cmdpb.SnapResponse{Region: d.Region()},
-					})
-					p.cb.Txn = d.ctx.engine.Kv.NewTransaction(false)
-				default:
-					log.Fatal("unknown CmdType")
-				}
-			}
-			raftCmdResponse.Responses = responses
-			kvWB.WriteToDB(d.ctx.engine.Kv)
-
-			p.cb.Done(raftCmdResponse)
-			return // 避免重复WriteToDB
-		} else { // 不知道为啥term匹配不上
+		if entry.Term == p.term {
+			return p // 只有这种情况有对应proposal
+		} else {
 			NotifyStaleReq(p.term, p.cb)
 		}
 	}
-	kvWB.WriteToDB(d.ctx.engine.Kv)
+	return nil
 }
 
 func (d *peerMsgHandler) HandleMsg(msg message.Msg) {
