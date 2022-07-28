@@ -225,7 +225,7 @@ func (m *MockSchedulerClient) AskSplit(ctx context.Context, region *metapb.Regio
 		return resp, err
 	}
 	if util.IsEpochStale(region.RegionEpoch, curRegion.RegionEpoch) {
-		return resp, errors.New("epoch is stale")
+		return resp, errors.New("AskSplit epoch is stale")
 	}
 
 	id, _ := m.AllocID(ctx)
@@ -306,7 +306,7 @@ func (m *MockSchedulerClient) handleHeartbeatVersion(region *metapb.Region) erro
 				bytes.Equal(searchRegion.GetEndKey(), region.GetEndKey()) {
 				// the two regions' range are same, must check epoch
 				if util.IsEpochStale(region.RegionEpoch, searchRegion.RegionEpoch) {
-					return errors.New("epoch is stale")
+					return errors.New("handleHeartbeatVersion1 epoch is stale")
 				}
 				if searchRegion.RegionEpoch.Version < region.RegionEpoch.Version {
 					m.removeRegionLocked(searchRegion)
@@ -324,7 +324,7 @@ func (m *MockSchedulerClient) handleHeartbeatVersion(region *metapb.Region) erro
 				// E.g, 1 [a, c) -> 1 [a, b) + 2 [b, c), either new 1 or 2 reports, the region
 				// is overlapped with origin [a, c).
 				if region.GetRegionEpoch().GetVersion() <= searchRegion.GetRegionEpoch().GetVersion() {
-					return errors.New("epoch is stale")
+					return errors.New("handleHeartbeatVersion2 epoch is stale")
 				}
 				m.removeRegionLocked(searchRegion)
 			}
@@ -335,7 +335,7 @@ func (m *MockSchedulerClient) handleHeartbeatVersion(region *metapb.Region) erro
 func (m *MockSchedulerClient) handleHeartbeatConfVersion(region *metapb.Region) error {
 	searchRegion, _ := m.getRegionLocked(region.GetStartKey())
 	if util.IsEpochStale(region.RegionEpoch, searchRegion.RegionEpoch) {
-		return errors.New("epoch is stale")
+		return errors.New("handleHeartbeatConfVersion epoch is stale")
 	}
 
 	regionPeerLen := len(region.GetPeers())

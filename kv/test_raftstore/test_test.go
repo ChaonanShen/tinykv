@@ -266,6 +266,8 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 			for i := 1; i <= nservers; i++ {
 				cluster.StartServer(uint64(i))
 			}
+
+			log.Warnf("recover from crash --------- ")
 		}
 
 		for cli := 0; cli < nclients; cli++ {
@@ -652,7 +654,7 @@ func TestOneSplit3B(t *testing.T) {
 
 	region := cluster.GetRegion([]byte("k1"))
 	region1 := cluster.GetRegion([]byte("k2"))
-	assert.Equal(t, region.GetId(), region1.GetId())
+	assert.Equal(t, region.GetId(), region1.GetId()) // 检查k1 k2都写入同一个region
 
 	cluster.AddFilter(
 		&PartitionFilter{
@@ -669,23 +671,25 @@ func TestOneSplit3B(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 	cluster.ClearFilters()
 
-	left := cluster.GetRegion([]byte("k1"))
-	right := cluster.GetRegion([]byte("k2"))
+	left := cluster.GetRegion([]byte("k1"))  // k1 k100 k101 k102 ...
+	right := cluster.GetRegion([]byte("k2")) // k2 k200 k201 k202 ...
 
-	assert.NotEqual(t, left.GetId(), right.GetId())
+	assert.NotEqual(t, left.GetId(), right.GetId()) // k1 k2应该在两个region中了
 	assert.True(t, bytes.Equal(region.GetStartKey(), left.GetStartKey()))
 	assert.True(t, bytes.Equal(left.GetEndKey(), right.GetStartKey()))
 	assert.True(t, bytes.Equal(right.GetEndKey(), region.GetEndKey()))
 
+	// k2不再left region中，所以去get会出错 -- 但是必须在applyNormalRequest中对put/get/delete进行CheckKeyInRegion,出错了在response.Header.Error中返回错误
 	req := NewRequest(left.GetId(), left.GetRegionEpoch(), []*raft_cmdpb.Request{NewGetCfCmd(engine_util.CfDefault, []byte("k2"))})
 	resp, _ := cluster.CallCommandOnLeader(&req, time.Second)
 	assert.NotNil(t, resp.GetHeader().GetError())
+	//log.Infof("error: %v", resp.GetHeader().GetError())
 	assert.NotNil(t, resp.GetHeader().GetError().GetKeyNotInRegion())
 
 	MustGetEqual(cluster.engines[5], []byte("k100"), []byte("v100"))
 }
 
-func TestSplitRecover3B(t *testing.T) {
+func TestSplitRecover3B(t *testing.T) { // 只有crash和split为true
 	// Test: restarts, snapshots, conf change, one client (3B) ...
 	GenericTest(t, "3B", 1, false, true, false, -1, false, true)
 }
