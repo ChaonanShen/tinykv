@@ -237,44 +237,37 @@ func regionToString(region *metapb.Region) string {
 }
 
 func (d *peerMsgHandler) applySplitRequest(splitRequest *raft_cmdpb.SplitRequest, kvWB *engine_util.WriteBatch, p *proposal) {
-	originRegion := d.Region()
-	originStartKey := originRegion.StartKey
-	originEndKey := originRegion.EndKey
-
-	if err := util.CheckKeyInRegion(splitRequest.SplitKey, originRegion); err != nil {
-		log.Infof("splitKey %v not in Region %v", splitRequest.SplitKey, d.Region().GetId())
+	if err := util.CheckKeyInRegion(splitRequest.SplitKey, d.Region()); err != nil {
+		log.Infof("store %v splitKey %v not in Region %v", d.storeID(), string(splitRequest.SplitKey), d.Region().GetId())
 		if p != nil {
 			p.cb.Done(ErrResp(err))
 		}
+		return
 	}
+
+	originRegion := d.Region()
+	originStartKey := originRegion.StartKey
+	originEndKey := originRegion.EndKey
 
 	if bytes.Compare(splitRequest.SplitKey, originEndKey) == 0 || bytes.Compare(splitRequest.SplitKey, originStartKey) == 0 {
 		return
 	}
 
-	originRegion.RegionEpoch.Version++
-
 	var newPeers []*metapb.Peer
-	for i, newPeerId := range splitRequest.NewPeerIds {
-		newPeers = append(newPeers, &metapb.Peer{Id: newPeerId, StoreId: originRegion.Peers[i].StoreId})
+	for i, peer := range originRegion.Peers {
+		newPeers = append(newPeers, &metapb.Peer{
+			Id:      splitRequest.NewPeerIds[i],
+			StoreId: peer.StoreId,
+		})
 	}
 
-	newPeerEndKey := []byte{}
-	newPeerStartKey := []byte{}
-
-	if engine_util.ExceedEndKey(splitRequest.SplitKey, originEndKey) {
-		newPeerStartKey = originEndKey
-		newPeerEndKey = splitRequest.SplitKey
-	} else {
-		originRegion.EndKey = splitRequest.SplitKey
-		newPeerStartKey = splitRequest.SplitKey
-		newPeerEndKey = originEndKey
-	}
-
+	originRegion.RegionEpoch.Version++
+	// 切分：originRegion[startKey, endKey) -> originRegion[startKey, splitKey) + newRegion[splitKey, endKey)
+	originRegion.EndKey = splitRequest.SplitKey
 	newRegion := &metapb.Region{ // newRegion的version可以是从1开始的吧
 		Id:       splitRequest.NewRegionId,
-		StartKey: newPeerStartKey,
-		EndKey:   newPeerEndKey,
+		StartKey: splitRequest.SplitKey,
+		EndKey:   originEndKey,
 		RegionEpoch: &metapb.RegionEpoch{
 			ConfVer: 1,
 			Version: 1,

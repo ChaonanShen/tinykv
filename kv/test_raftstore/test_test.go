@@ -267,7 +267,7 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 				cluster.StartServer(uint64(i))
 			}
 
-			log.Warnf("recover from crash --------- ")
+			log.Warnf("recovered from crash --------- ")
 		}
 
 		for cli := 0; cli < nclients; cli++ {
