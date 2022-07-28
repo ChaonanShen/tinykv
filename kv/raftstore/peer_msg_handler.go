@@ -262,12 +262,22 @@ func (d *peerMsgHandler) applySplitRequest(splitRequest *raft_cmdpb.SplitRequest
 	}
 
 	originRegion.RegionEpoch.Version++
-	// 切分：originRegion[startKey, endKey) -> originRegion[startKey, splitKey) + newRegion[splitKey, endKey)
-	originRegion.EndKey = splitRequest.SplitKey
+	newEndKey := []byte{}
+	newStartKey := []byte{}
+
+	if engine_util.ExceedEndKey(splitRequest.SplitKey, originEndKey) {
+		newStartKey = originEndKey
+		newEndKey = splitRequest.SplitKey
+	} else {
+		originRegion.EndKey = splitRequest.SplitKey
+		newStartKey = splitRequest.SplitKey
+		newEndKey = originEndKey
+	}
+
 	newRegion := &metapb.Region{ // newRegion的version可以是从1开始的吧
 		Id:       splitRequest.NewRegionId,
-		StartKey: splitRequest.SplitKey,
-		EndKey:   originEndKey,
+		StartKey: newStartKey,
+		EndKey:   newEndKey,
 		RegionEpoch: &metapb.RegionEpoch{
 			ConfVer: 1,
 			Version: 1,
