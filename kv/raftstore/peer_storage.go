@@ -411,13 +411,14 @@ func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (applyResult *ApplySnap
 	// 3.snapshot相关之后处理 RaftApplyState这里不用管，在commit entries时候一起修改 RaftApplyState里面也有snapshot相关信息
 
 	raftWB := new(engine_util.WriteBatch)
-	kvWB := new(engine_util.WriteBatch)
 
 	if !raft.IsEmptySnap(&ready.Snapshot) {
+		kvWB := &engine_util.WriteBatch{}
 		applyResult, err = ps.ApplySnapshot(&ready.Snapshot, kvWB, raftWB)
 		if err != nil {
 			return nil, err
 		}
+		kvWB.MustWriteToDB(ps.Engines.Kv)
 	}
 
 	// entries的LastTerm/LastIndex和HardState都在RaftLocalState中
@@ -435,14 +436,7 @@ func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (applyResult *ApplySnap
 		return nil, err
 	}
 
-	if err = kvWB.WriteToDB(ps.Engines.Kv); err != nil {
-		return nil, err
-	}
-	// TODO: 如果在这个位置程序崩溃，会不会导致raftDB和kvDB数据不一致？？？
-	// KvWB和raftWB写入先后顺序有没有关系？
-	if err = raftWB.WriteToDB(ps.Engines.Raft); err != nil {
-		return nil, err
-	}
+	raftWB.MustWriteToDB(ps.Engines.Raft)
 
 	return applyResult, nil
 }

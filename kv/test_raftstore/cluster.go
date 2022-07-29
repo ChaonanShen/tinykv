@@ -356,6 +356,8 @@ func (c *Cluster) MustDeleteCF(cf string, key []byte) {
 	}
 }
 
+// TestSplitRecoverManyClients3B bug: 传入start 5 00000000 end 5 00000001 GetSnap搞到的region居然是endKey=18 0000 0000 明显key不在这个region中
+
 func (c *Cluster) Scan(start, end []byte) [][]byte {
 	req := NewSnapCmd()
 	values := make([][]byte, 0)
