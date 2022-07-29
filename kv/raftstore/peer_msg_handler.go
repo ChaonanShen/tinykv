@@ -243,6 +243,7 @@ func (d *peerMsgHandler) applyAdminRequest(adminRequest *raft_cmdpb.AdminRequest
 只要进行了confchange和split这两个会改变regionEpoch的操作，就要检查epoch是否匹配（不匹配这个命令就不该执行） -- preProposeRaftCmd会进行checkRegionEpoch
 这样的话duplicate commands的问题也会解决，因为每次split/confchange后epoch都变化，同样命令发几次就只会执行一次
 用到key的地方也要进行CheckKeyInRegion，因为可能region进行了分裂,key可能已经不再里面了 - 那些put/get/delete命令apply时候都要检查下是否keyInRegion
+特别注意normal request也要进行CheckRegionEpoch(不光要进行CheckKeyInRegion)，否则比如snap命令可能会找到错误的region！导致Scan命令出错（这个bug整整debug一天，最后是慢慢自己写简单但能复现问题的test case，然后突然发现了出问题的好像都是scan命令apply前进行了split操作）
 */
 
 func regionToString(region *metapb.Region) string {
@@ -259,54 +260,47 @@ func (d *peerMsgHandler) applySplitRequest(splitRequest *raft_cmdpb.SplitRequest
 		return
 	}
 
+	var newPeers []*metapb.Peer
+	for i, peer := range originRegion.Peers {
+		newPeers = append(newPeers, &metapb.Peer{
+			Id:      splitRequest.NewPeerIds[i],
+			StoreId: peer.StoreId,
+		})
+	}
+
 	d.ctx.storeMeta.Lock()
-	d.ctx.storeMeta.regionRanges.Delete(&regionItem{region: originRegion})
+	d.ctx.storeMeta.regionRanges.Delete(&regionItem{d.Region()})
 
 	originRegion.RegionEpoch.Version++
 
-	newPeers := []*metapb.Peer{}
-	for i, newPeerId := range splitRequest.NewPeerIds {
-		newPeers = append(newPeers, &metapb.Peer{Id: newPeerId, StoreId: originRegion.Peers[i].StoreId})
-	} // 总归只要原有每个storeID上都新增这个newregion的peer就行
+	// region最初startKey="", endKey="" 这个region能包容所有keys
+	// 第一次split region1{"", splitKey1}, region2{splitKey1, ""}
+	// 各自再split: region11{"", splitKey2} region12{splitKey2, splitKey1} region21{splitKey1, splitKey3} region22{splitKey3, ""}
+	// 若endkey为"", ExceedEndKey(splitKey, endKey)返回false,表示splitKey不超过""
 
-	newPeerEndKey := []byte{}
-	newPeerStartKey := []byte{}
+	// startKey-splitKey-endKey --> originRegion{startKey, splitKey}/newRegion{splitKey, endKey}
+	originRegion.EndKey = splitRequest.SplitKey
+	newStartKey := splitRequest.SplitKey
+	newEndKey := originEndKey
 
-	//update originRegion endKey
-	if engine_util.ExceedEndKey(splitRequest.SplitKey, originEndKey) {
-		//log.Infof("splitKey exceedEndKey, startKey %v endKey %v splitKey %v",
-		//	string(originStartKey), string(originEndKey), string(splitRequest.SplitKey))
-		newPeerStartKey = originEndKey
-		newPeerEndKey = splitRequest.SplitKey
-	} else {
-		//log.Infof("splitKey not exceedEndKey, startKey %v splitKey %v endKey %v",
-		//	string(originStartKey), string(splitRequest.SplitKey), string(originEndKey))
-		originRegion.EndKey = splitRequest.SplitKey
-		newPeerStartKey = splitRequest.SplitKey
-		newPeerEndKey = originEndKey
-	}
-
-	newRegion := &metapb.Region{
+	newRegion := &metapb.Region{ // newRegion的version可以是从1开始的吧
 		Id:       splitRequest.NewRegionId,
-		StartKey: newPeerStartKey,
-		EndKey:   newPeerEndKey,
+		StartKey: newStartKey,
+		EndKey:   newEndKey,
 		RegionEpoch: &metapb.RegionEpoch{
-			ConfVer: originRegion.RegionEpoch.ConfVer,
-			Version: originRegion.RegionEpoch.Version},
+			ConfVer: 1,
+			Version: 1,
+		},
 		Peers: newPeers,
 	}
 
 	//log.Infof("applySplitRequest() store %v splitkey %v\noriginRegion %v\nnewRegion    %v",
 	//	d.storeID(), string(splitRequest.SplitKey), regionToString(originRegion), regionToString(newRegion))
 
-	d.ctx.storeMeta.regions[newRegion.Id] = newRegion
-	d.ctx.storeMeta.regions[originRegion.Id] = originRegion
-
-	//printRegions(d.ctx.storeMeta.regions)
-
 	d.ctx.storeMeta.regionRanges.ReplaceOrInsert(&regionItem{region: originRegion})
 	d.ctx.storeMeta.regionRanges.ReplaceOrInsert(&regionItem{region: newRegion})
-
+	d.ctx.storeMeta.regions[splitRequest.NewRegionId] = newRegion
+	d.ctx.storeMeta.regions[d.regionId] = originRegion
 	d.ctx.storeMeta.Unlock()
 
 	d.SetRegion(originRegion)
@@ -316,205 +310,28 @@ func (d *peerMsgHandler) applySplitRequest(splitRequest *raft_cmdpb.SplitRequest
 		panic(err)
 	}
 	d.ctx.router.register(newPeer)
-	_ = d.ctx.router.send(newRegion.Id, message.Msg{RegionID: newRegion.Id, Type: message.MsgTypeStart})
+	d.ctx.router.send(newRegion.Id, message.Msg{RegionID: newRegion.Id, Type: message.MsgTypeStart})
 
 	meta.WriteRegionState(kvWB, originRegion, rspb.PeerState_Normal)
 	meta.WriteRegionState(kvWB, newRegion, rspb.PeerState_Normal)
 
+	kvWB.MustWriteToDB(d.ctx.engine.Kv) // 一开始忘了持久化...导致region修改的信息没有更新
+
 	if p != nil {
-		p.cb.Done(&raft_cmdpb.RaftCmdResponse{
-			Header: &raft_cmdpb.RaftResponseHeader{},
-			AdminResponse: &raft_cmdpb.AdminResponse{
-				CmdType: raft_cmdpb.AdminCmdType_Split,
+		resp := &raft_cmdpb.RaftCmdResponse{
+			Header: &raft_cmdpb.RaftResponseHeader{CurrentTerm: d.Term()},
+			AdminResponse: &raft_cmdpb.AdminResponse{CmdType: raft_cmdpb.AdminCmdType_Split,
 				Split: &raft_cmdpb.SplitResponse{
-					Regions: []*metapb.Region{originRegion, newRegion},
-				},
-			},
-		})
+					Regions: []*metapb.Region{originRegion, newRegion}, // TODO: 返回regions?
+				}},
+		}
+		p.cb.Done(resp)
 	}
 
-	kvWB.MustWriteToDB(d.ctx.engine.Kv)
+	if d.IsLeader() {
+		d.HeartbeatScheduler(d.ctx.schedulerTaskSender)
+	}
 }
-
-//func printRegions(regions map[uint64]*metapb.Region) {
-//	s := "\n"
-//	for rid, region := range regions {
-//		s += string(rid) + " " + regionToString(region) + "\n"
-//	}
-//	log.Infof(s)
-//}
-
-//func (d *peerMsgHandler) applySplitRequest(splitReq *raft_cmdpb.SplitRequest, wb *engine_util.WriteBatch, p *proposal) {
-//	region := d.Region()
-//
-//	if err := util.CheckKeyInRegion(splitReq.SplitKey, region); err != nil {
-//		if p != nil {
-//			p.cb.Done(ErrResp(err))
-//		}
-//		return
-//	}
-//	// update meta info
-//	storeMeta := d.ctx.storeMeta
-//	storeMeta.Lock()
-//	storeMeta.regionRanges.Delete(&regionItem{region: region})
-//	region.RegionEpoch.Version += 1
-//	newPeers := make([]*metapb.Peer, 0)
-//	for i, peer := range region.Peers {
-//		newPeers = append(newPeers, &metapb.Peer{
-//			Id:      splitReq.NewPeerIds[i],
-//			StoreId: peer.StoreId,
-//		})
-//	}
-//	newRegion := &metapb.Region{
-//		Id:       splitReq.NewRegionId,
-//		StartKey: splitReq.SplitKey,
-//		EndKey:   region.EndKey,
-//		RegionEpoch: &metapb.RegionEpoch{
-//			ConfVer: 1,
-//			Version: 1,
-//		},
-//		Peers: newPeers,
-//	}
-//	storeMeta.regions[newRegion.Id] = newRegion
-//	region.EndKey = splitReq.SplitKey
-//	storeMeta.regionRanges.ReplaceOrInsert(&regionItem{region: region})
-//	storeMeta.regionRanges.ReplaceOrInsert(&regionItem{region: newRegion})
-//	storeMeta.Unlock()
-//	meta.WriteRegionState(wb, region, rspb.PeerState_Normal)
-//	meta.WriteRegionState(wb, newRegion, rspb.PeerState_Normal)
-//	// clear region size
-//	d.SizeDiffHint = 0
-//	d.ApproximateSize = new(uint64)
-//	// create peer
-//	newPeer, err := createPeer(d.ctx.store.Id, d.ctx.cfg, d.ctx.regionTaskSender, d.ctx.engine, newRegion)
-//	if err != nil {
-//		panic(err)
-//	}
-//	d.ctx.router.register(newPeer)
-//	// start new peer
-//	d.ctx.router.send(newRegion.Id, message.NewMsg(message.MsgTypeStart, nil))
-
-//	log.Infof("applySplitRequest() store %v splitkey %v\noriginRegion %v\nnewRegion    %v",
-//		d.storeID(), string(splitRequest.SplitKey), regionToString(originRegion), regionToString(newRegion))
-
-//	if p != nil {
-//		p.cb.Done(&raft_cmdpb.RaftCmdResponse{
-//			Header: &raft_cmdpb.RaftResponseHeader{},
-//			AdminResponse: &raft_cmdpb.AdminResponse{
-//				CmdType: raft_cmdpb.AdminCmdType_Split,
-//				Split: &raft_cmdpb.SplitResponse{
-//					Regions: []*metapb.Region{region, newRegion},
-//				},
-//			},
-//		})
-//	}
-//
-//	if d.IsLeader() {
-//		d.HeartbeatScheduler(d.ctx.schedulerTaskSender)
-//	}
-//
-//	wb.MustWriteToDB(d.ctx.engine.Kv)
-//}
-
-//func (d *peerMsgHandler) applySplitRequest(splitRequest *raft_cmdpb.SplitRequest, kvWB *engine_util.WriteBatch, p *proposal) {
-//	//if err := util.CheckKeyInRegion(splitRequest.SplitKey, d.Region()); err != nil {
-//	//	log.Infof("store %v splitKey %v not in Region %v", d.storeID(), string(splitRequest.SplitKey), d.Region().GetId())
-//	//	if p != nil {
-//	//		p.cb.Done(ErrResp(err))
-//	//	}
-//	//	return
-//	//}
-//
-//	originRegion := d.Region()
-//	originStartKey := originRegion.StartKey
-//	originEndKey := originRegion.EndKey
-//
-//	if bytes.Compare(splitRequest.SplitKey, originEndKey) == 0 || bytes.Compare(splitRequest.SplitKey, originStartKey) == 0 {
-//		return
-//	}
-//
-//	var newPeers []*metapb.Peer
-//	for i, peer := range originRegion.Peers {
-//		newPeers = append(newPeers, &metapb.Peer{
-//			Id:      splitRequest.NewPeerIds[i],
-//			StoreId: peer.StoreId,
-//		})
-//	}
-//
-//	d.ctx.storeMeta.Lock()
-//	d.ctx.storeMeta.regionRanges.Delete(&regionItem{d.Region()})
-//
-//	originRegion.RegionEpoch.Version++
-//
-//	newEndKey := []byte{}
-//	newStartKey := []byte{}
-//
-//	// region最初startKey="", endKey="" 这个region能包容所有keys
-//	// 第一次split region1{"", splitKey1}, region2{splitKey1, ""}
-//	// 各自再split: region11{"", splitKey2} region12{splitKey2, splitKey1} region21{splitKey1, splitKey3} region22{splitKey3, ""}
-//	// 若endkey为"", ExceedEndKey(splitKey, endKey)返回false,表示splitKey不超过""
-//	if engine_util.ExceedEndKey(splitRequest.SplitKey, originEndKey) {
-//		log.Infof("splitKey exceedEndKey, startKey %v endKey %v splitKey %v",
-//			string(originStartKey), string(originEndKey), string(splitRequest.SplitKey))
-//		newStartKey = originEndKey
-//		newEndKey = splitRequest.SplitKey
-//	} else { // startKey-splitKey-endKey --> originRegion{startKey, splitKey}/newRegion{splitKey, endKey}
-//		log.Infof("splitKey not exceedEndKey, startKey %v splitKey %v endKey %v",
-//			string(originStartKey), string(splitRequest.SplitKey), string(originEndKey))
-//		originRegion.EndKey = splitRequest.SplitKey
-//		newStartKey = splitRequest.SplitKey
-//		newEndKey = originEndKey
-//	}
-//
-//	newRegion := &metapb.Region{ // newRegion的version可以是从1开始的吧
-//		Id:       splitRequest.NewRegionId,
-//		StartKey: newStartKey,
-//		EndKey:   newEndKey,
-//		RegionEpoch: &metapb.RegionEpoch{
-//			ConfVer: 1,
-//			Version: 1,
-//		},
-//		Peers: newPeers,
-//	}
-//
-//	log.Infof("applySplitRequest() store %v splitkey %v\noriginRegion %v\nnewRegion    %v",
-//		d.storeID(), string(splitRequest.SplitKey), regionToString(originRegion), regionToString(newRegion))
-//
-//	d.ctx.storeMeta.regionRanges.ReplaceOrInsert(&regionItem{region: originRegion})
-//	d.ctx.storeMeta.regionRanges.ReplaceOrInsert(&regionItem{region: newRegion})
-//	d.ctx.storeMeta.regions[splitRequest.NewRegionId] = newRegion
-//	d.ctx.storeMeta.regions[d.regionId] = originRegion
-//	d.ctx.storeMeta.Unlock()
-//
-//	d.SetRegion(originRegion)
-//
-//	newPeer, err := createPeer(d.storeID(), d.ctx.cfg, d.ctx.regionTaskSender, d.ctx.engine, newRegion) // 在当前store上创建相应region
-//	if err != nil {
-//		panic(err)
-//	}
-//	d.ctx.router.register(newPeer)
-//	d.ctx.router.send(newRegion.Id, message.Msg{RegionID: newRegion.Id, Type: message.MsgTypeStart})
-//
-//	meta.WriteRegionState(kvWB, originRegion, rspb.PeerState_Normal)
-//	meta.WriteRegionState(kvWB, newRegion, rspb.PeerState_Normal)
-//
-//	kvWB.MustWriteToDB(d.ctx.engine.Kv) // 一开始忘了持久化...导致region修改的信息没有更新
-//
-//	if p != nil {
-//		resp := &raft_cmdpb.RaftCmdResponse{
-//			Header: &raft_cmdpb.RaftResponseHeader{CurrentTerm: d.Term()},
-//			AdminResponse: &raft_cmdpb.AdminResponse{CmdType: raft_cmdpb.AdminCmdType_Split,
-//				Split: &raft_cmdpb.SplitResponse{
-//					Regions: []*metapb.Region{originRegion, newRegion}, // TODO: 返回regions?
-//				}},
-//		}
-//		p.cb.Done(resp)
-//	}
-//
-//	if d.IsLeader() {
-//		d.HeartbeatScheduler(d.ctx.schedulerTaskSender)
-//	}
-//}
 
 func (d *peerMsgHandler) applyCompactLogRequest(req *raft_cmdpb.CompactLogRequest, kvWB *engine_util.WriteBatch, p *proposal) {
 	// 该截断了
