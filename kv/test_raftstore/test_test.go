@@ -203,18 +203,21 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 				clnts[cli] <- j
 			}()
 			last := ""
+			// 所以根据key的最开头就能知道是哪个client发出的请求
 			for atomic.LoadInt32(&done_clients) == 0 {
 				if (rand.Int() % 1000) < 500 {
+					// put的key非常固定 开头是clientId, 最低8位是递增的j // put的value也很固定 "x id j y"
 					key := strconv.Itoa(cli) + " " + fmt.Sprintf("%08d", j)
 					value := "x " + strconv.Itoa(cli) + " " + strconv.Itoa(j) + " y"
-					log.Infof("%d: client new put %v,%v", cli, key, value)
+					//log.Infof("%d: client new put %v,%v", cli, key, value)
 					cluster.MustPut([]byte(key), []byte(value))
 					last = NextValue(last, value)
 					j++
 				} else {
+					// scan的startKey 开头是clientId,之后8个0 很固定，
 					start := strconv.Itoa(cli) + " " + fmt.Sprintf("%08d", 0)
 					end := strconv.Itoa(cli) + " " + fmt.Sprintf("%08d", j)
-					log.Infof("%d: client new scan %v-%v", cli, start, end)
+					//log.Infof("%d: client new scan %v-%v", cli, start, end)
 					values := cluster.Scan([]byte(start), []byte(end))
 					v := string(bytes.Join(values, []byte("")))
 					if v != last {
@@ -330,6 +333,128 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 		}
 	}
 }
+
+//
+//// 看来是个并发问题，nclients足够多就会出问题
+//func Test22SplitRecoverManyClients3B(t *testing.T) {
+//	// Test: restarts, snapshots, conf change, many clients (3B) ...
+//	GenericTest(t, "3B", 5, false, true, false, -1, false, true)
+//}
+//
+//func GenericTest2(t *testing.T, part string, nclients int, crash bool, split bool) {
+//	nservers := 3
+//	cfg := config.NewTestConfig()
+//	if split {
+//		cfg.RegionMaxSize = 300
+//		cfg.RegionSplitSize = 200
+//	}
+//	cluster := NewTestCluster(nservers, cfg)
+//	cluster.Start()
+//	defer cluster.Shutdown()
+//
+//	electionTimeout := cfg.RaftBaseTickInterval * time.Duration(cfg.RaftElectionTimeoutTicks)
+//	// Wait for leader election
+//	time.Sleep(2 * electionTimeout)
+//
+//	done_partitioner := int32(0)
+//	done_confchanger := int32(0)
+//	done_clients := int32(0)
+//	ch_clients := make(chan bool)
+//	clnts := make([]chan int, nclients)
+//	for i := 0; i < nclients; i++ {
+//		clnts[i] = make(chan int, 1)
+//	}
+//	for i := 0; i < 3; i++ {
+//		log.Infof("Iteration %v --------- ", i)
+//		atomic.StoreInt32(&done_clients, 0)
+//		atomic.StoreInt32(&done_partitioner, 0)
+//		go SpawnClientsAndWait(t, ch_clients, nclients, func(cli int, t *testing.T) {
+//			j := 0
+//			defer func() {
+//				clnts[cli] <- j
+//			}()
+//			last := ""
+//			// 所以根据key的最开头就能知道是哪个client发出的请求
+//			for atomic.LoadInt32(&done_clients) == 0 {
+//				if (rand.Int() % 1000) < 500 {
+//					// put的key非常固定 开头是clientId, 最低8位是递增的j // put的value也很固定 "x id j y"
+//					key := strconv.Itoa(cli) + " " + fmt.Sprintf("%08d", j)
+//					value := "x " + strconv.Itoa(cli) + " " + strconv.Itoa(j) + " y"
+//					log.Infof("%d: client new put %v,%v", cli, key, value)
+//					cluster.MustPut([]byte(key), []byte(value))
+//					last = NextValue(last, value)
+//					j++
+//				} else {
+//					// scan的startKey 开头是clientId,之后8个0 很固定，
+//					start := strconv.Itoa(cli) + " " + fmt.Sprintf("%08d", 0)
+//					end := strconv.Itoa(cli) + " " + fmt.Sprintf("%08d", j)
+//					log.Infof("%d: client new scan %v-%v", cli, start, end)
+//					values := cluster.Scan([]byte(start), []byte(end))
+//					v := string(bytes.Join(values, []byte("")))
+//					if v != last {
+//						log.Fatalf("get wrong value, client %v\nwant:%v\ngot: %v\n", cli, last, v)
+//					}
+//				}
+//			}
+//		})
+//
+//		time.Sleep(2 * time.Second)             // 让其插入2s就停止（原先是5s）
+//		atomic.StoreInt32(&done_clients, 1)     // tell clients to quit
+//		atomic.StoreInt32(&done_partitioner, 1) // tell partitioner to quit
+//		atomic.StoreInt32(&done_confchanger, 1) // tell confchanger to quit
+//
+//		log.Infof("wait for clients --------- ")
+//		<-ch_clients
+//
+//		if crash {
+//			log.Warnf("shutdown servers --------- ")
+//			for i := 1; i <= nservers; i++ {
+//				cluster.StopServer(uint64(i))
+//			}
+//			// Wait for a while for servers to shutdown, since
+//			// shutdown isn't a real crash and isn't instantaneous
+//			time.Sleep(electionTimeout)
+//			log.Warnf("restart servers --------- ")
+//			// crash and re-start all
+//			for i := 1; i <= nservers; i++ {
+//				cluster.StartServer(uint64(i))
+//			}
+//
+//			log.Warnf("recovered from crash --------- ")
+//		}
+//
+//		for cli := 0; cli < nclients; cli++ {
+//			log.Infof("read from clients %d --------- ", cli)
+//			j := <-clnts[cli]
+//
+//			// if j < 10 {
+//			// 	log.Printf("Warning: client %d managed to perform only %d put operations in 1 sec?\n", i, j)
+//			// }
+//			start := strconv.Itoa(cli) + " " + fmt.Sprintf("%08d", 0)
+//			end := strconv.Itoa(cli) + " " + fmt.Sprintf("%08d", j)
+//			values := cluster.Scan([]byte(start), []byte(end))
+//			v := string(bytes.Join(values, []byte("")))
+//			checkClntAppends(t, cli, v, j)
+//
+//			for k := 0; k < j; k++ {
+//				key := strconv.Itoa(cli) + " " + fmt.Sprintf("%08d", k)
+//				cluster.MustDelete([]byte(key))
+//			}
+//		}
+//
+//		if split {
+//			r := cluster.GetRegion([]byte(""))
+//			if len(r.GetEndKey()) == 0 {
+//				t.Fatalf("region is not split --------- ")
+//			}
+//		}
+//	}
+//}
+//
+//func Test2SplitRecoverManyClients3B(t *testing.T) { // 只有crash & split为true
+//	// Test: restarts, snapshots, conf change, many clients (3B) ...
+//	GenericTest2(t, "3B", 5, true, true)
+//}
 
 func TestBasic2B(t *testing.T) {
 	// Test: one client (2B) ...

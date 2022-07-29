@@ -6,6 +6,7 @@ import (
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/meta"
 	"github.com/pingcap-incubator/tinykv/kv/util/engine_util"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
+	"reflect"
 	"time"
 
 	"github.com/Connor1996/badger/y"
@@ -70,13 +71,13 @@ func (d *peerMsgHandler) HandleRaftReady() {
 
 	//d.Send(d.ctx.trans, rd.Messages) -- 按理说消息重复发送应该也要能正确处理
 
-	if applyResult != nil {
+	if applyResult != nil && !reflect.DeepEqual(applyResult.PrevRegion, applyResult.Region) {
 		// change storeMeta
+		d.SetRegion(applyResult.Region)
 		d.ctx.storeMeta.Lock()
+		d.ctx.storeMeta.regions[applyResult.Region.Id] = applyResult.Region
 		d.ctx.storeMeta.regionRanges.Delete(&regionItem{region: applyResult.PrevRegion})
 		d.ctx.storeMeta.regionRanges.ReplaceOrInsert(&regionItem{region: applyResult.Region})
-		d.ctx.storeMeta.regions[applyResult.Region.Id] = applyResult.Region
-		d.SetRegion(applyResult.Region)
 		d.ctx.storeMeta.Unlock()
 	}
 
@@ -111,12 +112,19 @@ func (d *peerMsgHandler) process(entry *eraftpb.Entry, kvWB *engine_util.WriteBa
 		p := d.getProposal(entry)
 
 		if request.AdminRequest == nil {
+			if err = util.CheckRegionEpoch(request, d.Region(), true); err != nil {
+				//log.Infof("region %v store %d applyNormalRequest index=%d CheckRegionEpoch fail, stop apply this entry", d.regionId, d.storeID(), entry.Index)
+				if p != nil {
+					p.cb.Done(ErrResp(err))
+				}
+				return
+			}
 			d.applyNormalRequest(request.Requests, kvWB, p) // Normal request
 		} else {
 			// 对split进行CheckRegionEpoch, 其他normal request和CompactLog不需要检查RegionEpoch!
 			if request.AdminRequest.CmdType == raft_cmdpb.AdminCmdType_Split {
 				if err = util.CheckRegionEpoch(request, d.Region(), true); err != nil {
-					log.Infof("region %v store %v applySplitRequest index=%d CheckRegionEpoch fail, stop apply this entry", d.regionId, d.storeID(), entry.Index)
+					//log.Infof("region %v store %v applySplitRequest index=%d CheckRegionEpoch fail, stop apply this entry", d.regionId, d.storeID(), entry.Index)
 					if p != nil {
 						p.cb.Done(ErrResp(err))
 					}
@@ -191,7 +199,7 @@ func (d *peerMsgHandler) applyConfChange(entry *eraftpb.Entry, cc *eraftpb.ConfC
 			d.peer.insertPeerCache(newpeer)
 		}
 
-		d.ctx.storeMeta.regions[d.regionId] = region
+		d.ctx.storeMeta.regions[region.Id] = region
 		d.SetRegion(region)
 
 		meta.WriteRegionState(kvWB, region, rspb.PeerState_Normal)
@@ -208,6 +216,10 @@ func (d *peerMsgHandler) applyConfChange(entry *eraftpb.Entry, cc *eraftpb.ConfC
 			},
 		}
 		p.cb.Done(resp)
+	}
+
+	if d.IsLeader() {
+		d.HeartbeatScheduler(d.ctx.schedulerTaskSender)
 	}
 }
 
@@ -247,6 +259,7 @@ func (d *peerMsgHandler) applySplitRequest(splitRequest *raft_cmdpb.SplitRequest
 		return
 	}
 
+	d.ctx.storeMeta.Lock()
 	d.ctx.storeMeta.regionRanges.Delete(&regionItem{region: originRegion})
 
 	originRegion.RegionEpoch.Version++
@@ -261,13 +274,13 @@ func (d *peerMsgHandler) applySplitRequest(splitRequest *raft_cmdpb.SplitRequest
 
 	//update originRegion endKey
 	if engine_util.ExceedEndKey(splitRequest.SplitKey, originEndKey) {
-		log.Infof("splitKey exceedEndKey, startKey %v endKey %v splitKey %v",
-			string(originStartKey), string(originEndKey), string(splitRequest.SplitKey))
+		//log.Infof("splitKey exceedEndKey, startKey %v endKey %v splitKey %v",
+		//	string(originStartKey), string(originEndKey), string(splitRequest.SplitKey))
 		newPeerStartKey = originEndKey
 		newPeerEndKey = splitRequest.SplitKey
 	} else {
-		log.Infof("splitKey not exceedEndKey, startKey %v splitKey %v endKey %v",
-			string(originStartKey), string(splitRequest.SplitKey), string(originEndKey))
+		//log.Infof("splitKey not exceedEndKey, startKey %v splitKey %v endKey %v",
+		//	string(originStartKey), string(splitRequest.SplitKey), string(originEndKey))
 		originRegion.EndKey = splitRequest.SplitKey
 		newPeerStartKey = splitRequest.SplitKey
 		newPeerEndKey = originEndKey
@@ -283,14 +296,18 @@ func (d *peerMsgHandler) applySplitRequest(splitRequest *raft_cmdpb.SplitRequest
 		Peers: newPeers,
 	}
 
-	log.Infof("applySplitRequest() store %v splitkey %v\noriginRegion %v\nnewRegion    %v",
-		d.storeID(), string(splitRequest.SplitKey), regionToString(originRegion), regionToString(newRegion))
+	//log.Infof("applySplitRequest() store %v splitkey %v\noriginRegion %v\nnewRegion    %v",
+	//	d.storeID(), string(splitRequest.SplitKey), regionToString(originRegion), regionToString(newRegion))
+
+	d.ctx.storeMeta.regions[newRegion.Id] = newRegion
+	d.ctx.storeMeta.regions[originRegion.Id] = originRegion
+
+	//printRegions(d.ctx.storeMeta.regions)
 
 	d.ctx.storeMeta.regionRanges.ReplaceOrInsert(&regionItem{region: originRegion})
 	d.ctx.storeMeta.regionRanges.ReplaceOrInsert(&regionItem{region: newRegion})
 
-	d.ctx.storeMeta.regions[splitRequest.NewRegionId] = newRegion
-	d.ctx.storeMeta.regions[d.regionId] = originRegion
+	d.ctx.storeMeta.Unlock()
 
 	d.SetRegion(originRegion)
 
@@ -318,6 +335,14 @@ func (d *peerMsgHandler) applySplitRequest(splitRequest *raft_cmdpb.SplitRequest
 
 	kvWB.MustWriteToDB(d.ctx.engine.Kv)
 }
+
+//func printRegions(regions map[uint64]*metapb.Region) {
+//	s := "\n"
+//	for rid, region := range regions {
+//		s += string(rid) + " " + regionToString(region) + "\n"
+//	}
+//	log.Infof(s)
+//}
 
 //func (d *peerMsgHandler) applySplitRequest(splitReq *raft_cmdpb.SplitRequest, wb *engine_util.WriteBatch, p *proposal) {
 //	region := d.Region()
